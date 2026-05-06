@@ -107,7 +107,9 @@ struct DialConfig {
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let mode = args.next().ok_or_else(|| anyhow!("expected mode: serve | probe | dial"))?;
+    let mode = args
+        .next()
+        .ok_or_else(|| anyhow!("expected mode: serve | probe | dial"))?;
     let options = parse_args(args.collect());
 
     match mode.as_str() {
@@ -135,9 +137,9 @@ fn serve(config: PeerConfig) -> Result<()> {
     cache.put(&note.document_id, &note)?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(Some(
-        INTEROP_SCHEMA_VERSION.to_string(),
-    )));
+    document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(
+        Some(INTEROP_SCHEMA_VERSION.to_string()),
+    ));
 
     let cache = Arc::new(Mutex::new(cache));
     let document_registry = Arc::new(document_registry);
@@ -249,12 +251,17 @@ fn dial(config: DialConfig) -> Result<()> {
     cache.pull_all_backing_stores()?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(Some(
-        INTEROP_SCHEMA_VERSION.to_string(),
-    )));
+    document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(
+        Some(INTEROP_SCHEMA_VERSION.to_string()),
+    ));
 
     let mut stream = TcpStream::connect((config.target_host.as_str(), config.target_port))
-        .with_context(|| format!("failed to connect to {}:{}", config.target_host, config.target_port))?;
+        .with_context(|| {
+            format!(
+                "failed to connect to {}:{}",
+                config.target_host, config.target_port
+            )
+        })?;
 
     send_message(
         &mut stream,
@@ -265,6 +272,7 @@ fn dial(config: DialConfig) -> Result<()> {
             role: None,
             display_name: Some(config.display_name.clone()),
             supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
+            supported_mutation_contracts: None,
             supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
             supports_schema_catalog: Some(true),
         },
@@ -303,10 +311,8 @@ fn dial(config: DialConfig) -> Result<()> {
         },
     )?;
     let snapshot_response = read_message(&mut stream)?;
-    let applied = document_registry.apply_raw_snapshot_response::<CultNetInteropNote>(
-        &mut cache,
-        &snapshot_response,
-    )?;
+    let applied = document_registry
+        .apply_raw_snapshot_response::<CultNetInteropNote>(&mut cache, &snapshot_response)?;
     let note = applied
         .into_iter()
         .find(|candidate| candidate.author_runtime_id == remote_runtime_id)
@@ -383,8 +389,13 @@ fn start_tcp_server(
     document_registry: Arc<CultNetDocumentRegistry>,
     schema_registry: Arc<CultNetSchemaRegistry>,
 ) -> Result<()> {
-    let listener = TcpListener::bind((config.bind_host.as_str(), config.tcp_port))
-        .with_context(|| format!("failed to bind TCP listener on {}:{}", config.bind_host, config.tcp_port))?;
+    let listener =
+        TcpListener::bind((config.bind_host.as_str(), config.tcp_port)).with_context(|| {
+            format!(
+                "failed to bind TCP listener on {}:{}",
+                config.bind_host, config.tcp_port
+            )
+        })?;
     listener.set_nonblocking(false)?;
 
     thread::spawn(move || {
@@ -397,7 +408,8 @@ fn start_tcp_server(
             let document_registry = document_registry.clone();
             let schema_registry = schema_registry.clone();
             thread::spawn(move || {
-                let _ = handle_connection(stream, config, cache, document_registry, schema_registry);
+                let _ =
+                    handle_connection(stream, config, cache, document_registry, schema_registry);
             });
         }
     });
@@ -430,6 +442,7 @@ fn handle_connection(
                         role: None,
                         display_name: Some(config.display_name.clone()),
                         supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
+                        supported_mutation_contracts: None,
                         supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
                         supports_schema_catalog: Some(true),
                     },
@@ -455,7 +468,8 @@ fn handle_connection(
                         document.source_runtime_id = Some(config.runtime_id.clone());
                         document.source_agent_id = Some(config.agent_id.clone());
                         document.source_role = Some("peer".to_string());
-                        document.tags = Some(vec!["interop".to_string(), config.runtime_id.clone()]);
+                        document.tags =
+                            Some(vec!["interop".to_string(), config.runtime_id.clone()]);
                     }
                 }
                 send_message(&mut stream, &response)?;
@@ -608,7 +622,9 @@ fn parse_u16_arg(options: &BTreeMap<String, String>, name: &str) -> Result<u16> 
 }
 
 fn parse_u64_arg(options: &BTreeMap<String, String>, name: &str) -> Option<u64> {
-    options.get(name).map(|value| value.parse::<u64>().expect("u64 arg"))
+    options
+        .get(name)
+        .map(|value| value.parse::<u64>().expect("u64 arg"))
 }
 
 fn parse_ipv4_arg(options: &BTreeMap<String, String>, name: &str) -> Result<Ipv4Addr> {
