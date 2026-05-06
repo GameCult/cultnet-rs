@@ -5,9 +5,12 @@ use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 use cultnet_rs::CultNetClientSecurityOptions;
 use cultnet_rs::CultNetDocumentBinding;
+use cultnet_rs::CultNetDocumentMutationContract;
+use cultnet_rs::CultNetDocumentOperation;
 use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
+use cultnet_rs::CultNetMutationAuthority;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
@@ -70,6 +73,21 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
         role: None,
         display_name: Some("Void".to_string()),
         supported_document_types: Some(vec!["ghostlight.agent-state".to_string()]),
+        supported_mutation_contracts: Some(vec![CultNetDocumentMutationContract {
+            document_type: "ghostlight.agent-state".to_string(),
+            payload_schema_version: Some("ghostlight.agent_state.v0".to_string()),
+            operations: vec![
+                CultNetDocumentOperation::Snapshot,
+                CultNetDocumentOperation::DocumentPut,
+            ],
+            authority: CultNetMutationAuthority::Coordinator,
+            intent_document_types: Some(vec!["ghostlight.agent-state.intent.v0".to_string()]),
+            receipt_document_types: Some(vec!["ghostlight.agent-state.receipt.v0".to_string()]),
+            notes: Some(vec![
+                "Face may request bounded memory mutation; coordinator reviews authority."
+                    .to_string(),
+            ]),
+        }]),
         supported_message_versions: None,
         supports_schema_catalog: Some(true),
     };
@@ -126,6 +144,7 @@ fn rust_decodes_typescript_generated_cultnet_frames() -> Result<()> {
             role: None,
             display_name: Some("Void".to_string()),
             supported_document_types: Some(vec!["ghostlight.agent-state".to_string()]),
+            supported_mutation_contracts: None,
             supported_message_versions: None,
             supports_schema_catalog: None,
         }
@@ -146,6 +165,35 @@ fn rust_decodes_typescript_generated_cultnet_frames() -> Result<()> {
             password: "cGFzc3dvcmQ".to_string(),
         }
     );
+    Ok(())
+}
+
+#[test]
+fn document_registry_advertises_mutation_contracts_with_bindings() -> Result<()> {
+    let mut registry = CultNetDocumentRegistry::new();
+    let contract = CultNetDocumentMutationContract {
+        document_type: "ghostlight.agent-state".to_string(),
+        payload_schema_version: Some("ghostlight.agent_state.v0".to_string()),
+        operations: vec![
+            CultNetDocumentOperation::Snapshot,
+            CultNetDocumentOperation::IntentSubmit,
+            CultNetDocumentOperation::ReceiptWatch,
+        ],
+        authority: CultNetMutationAuthority::Coordinator,
+        intent_document_types: Some(vec!["ghostlight.agent-state.intent.v0".to_string()]),
+        receipt_document_types: Some(vec!["ghostlight.agent-state.receipt.v0".to_string()]),
+        notes: Some(vec![
+            "Intent documents are reviewed before cache mutation.".to_string(),
+        ]),
+    };
+    registry.register(
+        CultNetDocumentBinding::for_entry::<GhostlightAgentStateFixture>(Some(
+            "ghostlight.agent_state.v0".to_string(),
+        ))
+        .with_mutation_contract(contract.clone()),
+    );
+
+    assert_eq!(registry.mutation_contracts(), vec![contract]);
     Ok(())
 }
 

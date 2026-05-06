@@ -14,10 +14,18 @@ The contract is intentionally boring:
 - document put/delete/snapshot messages move typed CultCache entries.
 - raw document put/snapshot messages preserve canonical MessagePack payload
   bytes for bit-compatible neighbors.
+- hello messages advertise `supportedMutationContracts`, so callers discover
+  which document types are read-only, which accept typed intents, which
+  authority owns the mutation, and which receipt documents prove the outcome.
 - payloads are decoded through registered Rust types before entering the cache.
 
 This crate is not an HTTP wrapper. It is the wire vocabulary Epiphany,
 Ghostlight, VoidBot, and the rest of the swarm can share.
+
+The public API surface is the schema plus its mutation contracts. A runtime does
+not expose a pile of bespoke verbs and hope everyone remembers the ritual; it
+advertises typed documents, typed intents, and typed receipts. Polite machines
+knock on the contract before touching the furniture.
 
 ## Receipts
 
@@ -34,6 +42,7 @@ The initial tests prove:
 - schema discovery catalog responses with canonical JSON schema hashes
 - CultCache snapshot replication through registered typed documents
 - raw snapshot replication that preserves the original payload bytes
+- document mutation contract advertisement through hello frames and registries
 
 ## Schema Discovery
 

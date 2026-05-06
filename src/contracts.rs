@@ -47,6 +47,42 @@ pub struct CultNetDocumentRecord<TPayload = Value> {
     pub tags: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CultNetDocumentOperation {
+    Snapshot,
+    DocumentPut,
+    DocumentDelete,
+    IntentSubmit,
+    ReceiptWatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CultNetMutationAuthority {
+    ReadOnly,
+    LocalUser,
+    Coordinator,
+    Runtime,
+    Denied,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetDocumentMutationContract {
+    pub document_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_schema_version: Option<String>,
+    pub operations: Vec<CultNetDocumentOperation>,
+    pub authority: CultNetMutationAuthority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_document_types: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_document_types: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CultNetRawDocumentRecord {
@@ -100,6 +136,8 @@ pub enum CultNetMessage {
         display_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_document_types: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supported_mutation_contracts: Option<Vec<CultNetDocumentMutationContract>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_message_versions: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,6 +289,7 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             role,
             display_name,
             supported_document_types,
+            supported_mutation_contracts,
             supported_message_versions,
             supports_schema_catalog: _,
         } => {
@@ -263,6 +302,11 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
                 supported_document_types.as_deref(),
                 "supportedDocumentTypes",
             )?;
+            if let Some(contracts) = supported_mutation_contracts {
+                for contract in contracts {
+                    validate_mutation_contract(contract)?;
+                }
+            }
             require_optional_string_vec(
                 supported_message_versions.as_deref(),
                 "supportedMessageVersions",
@@ -365,6 +409,30 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn validate_mutation_contract(contract: &CultNetDocumentMutationContract) -> Result<()> {
+    require_non_empty(&contract.document_type, "documentType")?;
+    require_optional_non_empty(
+        contract.payload_schema_version.as_deref(),
+        "payloadSchemaVersion",
+    )?;
+    if contract.operations.is_empty() {
+        return Err(anyhow!(
+            "CultNet mutation contract for {:?} must advertise at least one operation",
+            contract.document_type
+        ));
+    }
+    require_optional_string_vec(
+        contract.intent_document_types.as_deref(),
+        "intentDocumentTypes",
+    )?;
+    require_optional_string_vec(
+        contract.receipt_document_types.as_deref(),
+        "receiptDocumentTypes",
+    )?;
+    require_optional_string_vec(contract.notes.as_deref(), "notes")?;
     Ok(())
 }
 

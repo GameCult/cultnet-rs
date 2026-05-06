@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use crate::CultNetDocumentMutationContract;
 use crate::CultNetDocumentRecord;
 use crate::CultNetMessage;
 use crate::CultNetRawDocumentRecord;
@@ -28,6 +29,7 @@ pub struct CultNetDocumentPutOptions {
 pub struct CultNetDocumentBinding {
     pub document_type: String,
     pub payload_schema_version: Option<String>,
+    pub mutation_contract: Option<CultNetDocumentMutationContract>,
 }
 
 impl CultNetDocumentBinding {
@@ -35,7 +37,13 @@ impl CultNetDocumentBinding {
         Self {
             document_type: T::TYPE.to_string(),
             payload_schema_version: payload_schema_version.into(),
+            mutation_contract: None,
         }
+    }
+
+    pub fn with_mutation_contract(mut self, contract: CultNetDocumentMutationContract) -> Self {
+        self.mutation_contract = Some(contract);
+        self
     }
 }
 
@@ -56,6 +64,13 @@ impl CultNetDocumentRegistry {
 
     pub fn binding(&self, document_type: &str) -> Option<&CultNetDocumentBinding> {
         self.bindings.get(document_type)
+    }
+
+    pub fn mutation_contracts(&self) -> Vec<CultNetDocumentMutationContract> {
+        self.bindings
+            .values()
+            .filter_map(|binding| binding.mutation_contract.clone())
+            .collect()
     }
 
     pub fn create_document_put_message<T>(
