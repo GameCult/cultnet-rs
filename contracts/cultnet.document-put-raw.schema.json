@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put-raw.schema.json",
+  "title": "CultNet Raw Document Put Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "document"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.document_put_raw.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "document": {
+      "$ref": "./cultnet.raw-document-record.schema.json"
+    }
+  }
+}

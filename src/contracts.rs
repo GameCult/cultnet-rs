@@ -22,6 +22,12 @@ pub enum CultNetSchemaKind {
     SharedContract,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CultNetRawPayloadEncoding {
+    Messagepack,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CultNetDocumentRecord<TPayload = Value> {
@@ -31,6 +37,27 @@ pub struct CultNetDocumentRecord<TPayload = Value> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_schema_version: Option<String>,
     pub payload: TPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetRawDocumentRecord {
+    pub document_type: String,
+    pub document_key: String,
+    pub stored_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_schema_version: Option<String>,
+    pub payload_encoding: CultNetRawPayloadEncoding,
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_runtime_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +139,11 @@ pub enum CultNetMessage {
         document_type: String,
         document_key: String,
     },
+    #[serde(rename = "cultnet.document_put_raw.v0", rename_all = "camelCase")]
+    DocumentPutRaw {
+        message_id: String,
+        document: CultNetRawDocumentRecord,
+    },
     #[serde(rename = "cultnet.snapshot_request.v0", rename_all = "camelCase")]
     SnapshotRequest {
         message_id: String,
@@ -124,6 +156,11 @@ pub enum CultNetMessage {
     SnapshotResponse {
         message_id: String,
         documents: Vec<CultNetDocumentRecord<Value>>,
+    },
+    #[serde(rename = "cultnet.snapshot_response_raw.v0", rename_all = "camelCase")]
+    SnapshotResponseRaw {
+        message_id: String,
+        documents: Vec<CultNetRawDocumentRecord>,
     },
     #[serde(rename = "cultnet.schema_catalog_request.v0", rename_all = "camelCase")]
     SchemaCatalogRequest {
@@ -151,8 +188,15 @@ pub fn parse_cultnet_message(
 ) -> Result<CultNetMessage> {
     match contract {
         CultNetWireContract::CultNetSchemaV0 => {
-            let json_value: Value = rmp_serde::from_slice(&rmp_serde::to_vec(wire_value)?)?;
-            let message: CultNetMessage = serde_json::from_value(json_value)?;
+            let message = match schema_version_from_wire_value(wire_value)? {
+                Some("cultnet.document_put_raw.v0" | "cultnet.snapshot_response_raw.v0") => {
+                    parse_raw_cultnet_schema_message(wire_value)?
+                }
+                _ => {
+                    let json_value: Value = rmp_serde::from_slice(&rmp_serde::to_vec(wire_value)?)?;
+                    serde_json::from_value(json_value)?
+                }
+            };
             validate_message(&message)?;
             Ok(message)
         }
@@ -166,9 +210,14 @@ pub fn encode_cultnet_message_for_wire(
 ) -> Result<rmpv::Value> {
     validate_message(message)?;
     match contract {
-        CultNetWireContract::CultNetSchemaV0 => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
-            &serde_json::to_value(message)?,
-        )?)?),
+        CultNetWireContract::CultNetSchemaV0 => match message {
+            CultNetMessage::DocumentPutRaw { .. } | CultNetMessage::SnapshotResponseRaw { .. } => {
+                encode_raw_cultnet_schema_message(message)
+            }
+            _ => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
+                &serde_json::to_value(message)?,
+            )?)?),
+        },
         CultNetWireContract::GameCultNetworkingV0 => encode_gamecult_networking_message(message),
     }
 }
@@ -186,10 +235,8 @@ pub fn decode_cultnet_message_from_slice(
     contract: CultNetWireContract,
 ) -> Result<CultNetMessage> {
     if contract == CultNetWireContract::CultNetSchemaV0 {
-        let json_value: Value = rmp_serde::from_slice(bytes)?;
-        let message: CultNetMessage = serde_json::from_value(json_value)?;
-        validate_message(&message)?;
-        return Ok(message);
+        let wire_value: rmpv::Value = rmp_serde::from_slice(bytes)?;
+        return parse_cultnet_message(&wire_value, contract);
     }
     let wire_value: rmpv::Value = rmp_serde::from_slice(bytes)?;
     parse_cultnet_message(&wire_value, contract)
@@ -265,6 +312,13 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(document_type, "documentType")?;
             require_non_empty(document_key, "documentKey")?;
         }
+        CultNetMessage::DocumentPutRaw {
+            message_id,
+            document,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            validate_raw_document_record(document)?;
+        }
         CultNetMessage::SnapshotRequest {
             message_id,
             document_types,
@@ -281,6 +335,15 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(message_id, "messageId")?;
             for document in documents {
                 validate_document_record(document)?;
+            }
+        }
+        CultNetMessage::SnapshotResponseRaw {
+            message_id,
+            documents,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            for document in documents {
+                validate_raw_document_record(document)?;
             }
         }
         CultNetMessage::SchemaCatalogRequest {
@@ -313,6 +376,26 @@ fn validate_document_record(document: &CultNetDocumentRecord<Value>) -> Result<(
         document.payload_schema_version.as_deref(),
         "payloadSchemaVersion",
     )?;
+    require_optional_non_empty(document.source_runtime_id.as_deref(), "sourceRuntimeId")?;
+    require_optional_non_empty(document.source_agent_id.as_deref(), "sourceAgentId")?;
+    require_optional_non_empty(document.source_role.as_deref(), "sourceRole")?;
+    require_optional_string_vec(document.tags.as_deref(), "tags")?;
+    Ok(())
+}
+
+fn validate_raw_document_record(document: &CultNetRawDocumentRecord) -> Result<()> {
+    require_non_empty(&document.document_type, "documentType")?;
+    require_non_empty(&document.document_key, "documentKey")?;
+    require_non_empty(&document.stored_at, "storedAt")?;
+    require_optional_non_empty(
+        document.payload_schema_version.as_deref(),
+        "payloadSchemaVersion",
+    )?;
+    if document.payload.is_empty() {
+        return Err(anyhow!(
+            "CultNet field payload must contain non-empty MessagePack bytes"
+        ));
+    }
     require_optional_non_empty(document.source_runtime_id.as_deref(), "sourceRuntimeId")?;
     require_optional_non_empty(document.source_agent_id.as_deref(), "sourceAgentId")?;
     require_optional_non_empty(document.source_role.as_deref(), "sourceRole")?;
@@ -358,6 +441,229 @@ fn require_optional_string_vec(value: Option<&[String]>, field: &str) -> Result<
         }
     }
     Ok(())
+}
+
+fn schema_version_from_wire_value(input: &rmpv::Value) -> Result<Option<&str>> {
+    let Some(object) = input.as_map() else {
+        return Ok(None);
+    };
+
+    Ok(object.iter().find_map(|(key, value)| {
+        key.as_str()
+            .filter(|candidate| *candidate == "schemaVersion")
+            .and_then(|_| value.as_str())
+    }))
+}
+
+fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessage> {
+    let object = input
+        .as_map()
+        .ok_or_else(|| anyhow!("cultnet.schema.v0 raw messages must be objects"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    let schema_version = require_legacy_string(get("schemaVersion"), "schemaVersion")?;
+    match schema_version.as_str() {
+        "cultnet.document_put_raw.v0" => Ok(CultNetMessage::DocumentPutRaw {
+            message_id: require_legacy_string(get("messageId"), "messageId")?,
+            document: require_raw_document_record(get("document"), "document")?,
+        }),
+        "cultnet.snapshot_response_raw.v0" => {
+            let documents = get("documents")
+                .and_then(rmpv::Value::as_array)
+                .ok_or_else(|| anyhow!("documents must be an array"))?
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    require_raw_document_record(value.into(), &format!("documents[{index}]"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok(CultNetMessage::SnapshotResponseRaw {
+                message_id: require_legacy_string(get("messageId"), "messageId")?,
+                documents,
+            })
+        }
+        _ => Err(anyhow!(
+            "Unsupported raw cultnet.schema.v0 schemaVersion {schema_version}"
+        )),
+    }
+}
+
+fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::Value> {
+    Ok(rmpv::Value::Map(match message {
+        CultNetMessage::DocumentPutRaw {
+            message_id,
+            document,
+        } => vec![
+            (
+                rmpv::Value::from("schemaVersion"),
+                rmpv::Value::from("cultnet.document_put_raw.v0"),
+            ),
+            (
+                rmpv::Value::from("messageId"),
+                rmpv::Value::from(message_id.as_str()),
+            ),
+            (
+                rmpv::Value::from("document"),
+                encode_raw_document_record(document),
+            ),
+        ],
+        CultNetMessage::SnapshotResponseRaw {
+            message_id,
+            documents,
+        } => vec![
+            (
+                rmpv::Value::from("schemaVersion"),
+                rmpv::Value::from("cultnet.snapshot_response_raw.v0"),
+            ),
+            (
+                rmpv::Value::from("messageId"),
+                rmpv::Value::from(message_id.as_str()),
+            ),
+            (
+                rmpv::Value::from("documents"),
+                rmpv::Value::Array(documents.iter().map(encode_raw_document_record).collect()),
+            ),
+        ],
+        _ => {
+            return Err(anyhow!(
+                "Message is not a raw cultnet.schema.v0 binary replication message"
+            ));
+        }
+    }))
+}
+
+fn require_raw_document_record(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<CultNetRawDocumentRecord> {
+    let object = value
+        .and_then(rmpv::Value::as_map)
+        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    let payload_encoding = require_legacy_string(
+        get("payloadEncoding"),
+        &format!("{field_name}.payloadEncoding"),
+    )?;
+
+    Ok(CultNetRawDocumentRecord {
+        document_type: require_legacy_string(
+            get("documentType"),
+            &format!("{field_name}.documentType"),
+        )?,
+        document_key: require_legacy_string(
+            get("documentKey"),
+            &format!("{field_name}.documentKey"),
+        )?,
+        stored_at: require_legacy_string(get("storedAt"), &format!("{field_name}.storedAt"))?,
+        payload_schema_version: require_legacy_optional_string(
+            get("payloadSchemaVersion"),
+            &format!("{field_name}.payloadSchemaVersion"),
+        )?,
+        payload_encoding: match payload_encoding.as_str() {
+            "messagepack" => CultNetRawPayloadEncoding::Messagepack,
+            _ => {
+                return Err(anyhow!(
+                    "{field_name}.payloadEncoding has unsupported value {payload_encoding}"
+                ));
+            }
+        },
+        payload: get("payload")
+            .and_then(rmpv::Value::as_slice)
+            .map(|bytes| bytes.to_vec())
+            .ok_or_else(|| anyhow!("{field_name}.payload must be binary MessagePack bytes"))?,
+        source_runtime_id: require_legacy_optional_string(
+            get("sourceRuntimeId"),
+            &format!("{field_name}.sourceRuntimeId"),
+        )?,
+        source_agent_id: require_legacy_optional_string(
+            get("sourceAgentId"),
+            &format!("{field_name}.sourceAgentId"),
+        )?,
+        source_role: require_legacy_optional_string(
+            get("sourceRole"),
+            &format!("{field_name}.sourceRole"),
+        )?,
+        tags: require_legacy_optional_string_array(get("tags"), &format!("{field_name}.tags"))?,
+    })
+}
+
+fn encode_raw_document_record(document: &CultNetRawDocumentRecord) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("documentType"),
+            rmpv::Value::from(document.document_type.as_str()),
+        ),
+        (
+            rmpv::Value::from("documentKey"),
+            rmpv::Value::from(document.document_key.as_str()),
+        ),
+        (
+            rmpv::Value::from("storedAt"),
+            rmpv::Value::from(document.stored_at.as_str()),
+        ),
+        (
+            rmpv::Value::from("payloadSchemaVersion"),
+            document
+                .payload_schema_version
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("payloadEncoding"),
+            rmpv::Value::from(match document.payload_encoding {
+                CultNetRawPayloadEncoding::Messagepack => "messagepack",
+            }),
+        ),
+        (
+            rmpv::Value::from("payload"),
+            rmpv::Value::Binary(document.payload.clone()),
+        ),
+        (
+            rmpv::Value::from("sourceRuntimeId"),
+            document
+                .source_runtime_id
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("sourceAgentId"),
+            document
+                .source_agent_id
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("sourceRole"),
+            document
+                .source_role
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("tags"),
+            legacy_optional_string_array(document.tags.as_deref()),
+        ),
+    ])
 }
 
 fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessage> {

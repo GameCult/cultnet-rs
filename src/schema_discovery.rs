@@ -285,6 +285,20 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
+            include_str!("../contracts/cultnet.raw-document-record.schema.json"),
+            CultNetSchemaKind::SharedContract,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            None,
+            None,
+        )?,
+        schema_registration(
+            include_str!("../contracts/cultnet.document-put-raw.schema.json"),
+            CultNetSchemaKind::WireMessage,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("cultnet.document_put_raw.v0"),
+            None,
+        )?,
+        schema_registration(
             include_str!("../contracts/cultnet.snapshot-request.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
@@ -296,6 +310,13 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             CultNetSchemaKind::WireMessage,
             vec![CultNetWireContract::CultNetSchemaV0],
             Some("cultnet.snapshot_response.v0"),
+            None,
+        )?,
+        schema_registration(
+            include_str!("../contracts/cultnet.snapshot-response-raw.schema.json"),
+            CultNetSchemaKind::WireMessage,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("cultnet.snapshot_response_raw.v0"),
             None,
         )?,
         schema_registration(

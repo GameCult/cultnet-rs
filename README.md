@@ -12,6 +12,8 @@ The contract is intentionally boring:
 - schema discovery uses explicit catalog request/response messages; no inbound
   auto-detect sludge.
 - document put/delete/snapshot messages move typed CultCache entries.
+- raw document put/snapshot messages preserve canonical MessagePack payload
+  bytes for bit-compatible neighbors.
 - payloads are decoded through registered Rust types before entering the cache.
 
 This crate is not an HTTP wrapper. It is the wire vocabulary Epiphany,
@@ -31,6 +33,7 @@ The initial tests prove:
 - legacy `gamecult.networking.v0` login mapping
 - schema discovery catalog responses with canonical JSON schema hashes
 - CultCache snapshot replication through registered typed documents
+- raw snapshot replication that preserves the original payload bytes
 
 ## Schema Discovery
 
@@ -47,3 +50,21 @@ your own closed-world schema set with `CultNetSchemaRegistry`. Discovery stays
 explicit on purpose: peers advertise only the contracts they were compiled to
 understand, the same way CultCache only consumes the document types you
 registered instead of pretending polymorphism is a public park.
+
+## Local Fast Lane
+
+`cultnet-rs` now mirrors the raw replication seam from `cultnet-ts`:
+
+- `cultnet.document_put_raw.v0`
+- `cultnet.snapshot_response_raw.v0`
+
+Those messages carry the exact persisted MessagePack payload bytes from
+CultCache along with the typed envelope metadata. Combined with
+`CultCache::put_envelope::<T>()`, that lets a bit-compatible neighbor ingest the
+document without re-encoding the payload first.
+
+That still is not zero-copy in the religious sense. Frames allocate, bytes move,
+and the receiving cache still decodes once to keep typed reads and validation
+honest. The win is narrower and realer: identical payload bytes stop getting
+decoded into generic sludge and then encoded right back into the same bytes for
+no reason.

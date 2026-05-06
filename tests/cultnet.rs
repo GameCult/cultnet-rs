@@ -201,6 +201,51 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
 }
 
 #[test]
+fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let origin_store = temp.path().join("origin-raw.msgpack");
+    let target_store = temp.path().join("target-raw.msgpack");
+    let payload = GhostlightAgentStateFixture {
+        schema_version: "ghostlight.agent_state.v0".to_string(),
+        agent_id: "epiphany.face".to_string(),
+        display_name: "Face".to_string(),
+    };
+
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding::for_entry::<
+        GhostlightAgentStateFixture,
+    >(Some("ghostlight.agent_state.v0".to_string())));
+
+    let mut origin = CultCache::new();
+    origin.register_entry_type::<GhostlightAgentStateFixture>()?;
+    origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
+    origin.pull_all_backing_stores()?;
+    origin.put("epiphany.face", &payload)?;
+
+    let raw_snapshot =
+        registry.create_raw_snapshot_response(&origin, "raw-snapshot-1", None, None)?;
+    let source_envelope =
+        origin.get_required_envelope::<GhostlightAgentStateFixture>("epiphany.face")?;
+
+    let mut target = CultCache::new();
+    target.register_entry_type::<GhostlightAgentStateFixture>()?;
+    target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store));
+    target.pull_all_backing_stores()?;
+    let applied = registry
+        .apply_raw_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &raw_snapshot)?;
+    let target_envelope =
+        target.get_required_envelope::<GhostlightAgentStateFixture>("epiphany.face")?;
+
+    assert_eq!(applied, vec![payload.clone()]);
+    assert_eq!(target_envelope.payload, source_envelope.payload);
+    assert_eq!(
+        target.get_required::<GhostlightAgentStateFixture>("epiphany.face")?,
+        payload
+    );
+    Ok(())
+}
+
+#[test]
 fn client_security_keeps_the_connection_key_visible_without_exposing_cipher_logic() -> Result<()> {
     let options = CultNetClientSecurityOptions::development();
     assert_eq!(options.connection_key, "gamecult-dev-connection-key");
