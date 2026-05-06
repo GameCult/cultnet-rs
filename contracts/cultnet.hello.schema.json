@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.hello.schema.json",
+  "title": "CultNet Hello Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runtimeId",
+    "runtimeKind"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.hello.v0" },
+    "runtimeId": { "type": "string", "minLength": 1 },
+    "runtimeKind": { "type": "string", "minLength": 1 },
+    "agentId": { "type": "string", "minLength": 1 },
+    "role": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string", "minLength": 1 },
+    "supportedDocumentTypes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "supportedMessageVersions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "supportsSchemaCatalog": { "type": "boolean" }
+  }
+}

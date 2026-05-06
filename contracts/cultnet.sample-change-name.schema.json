@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.sample-change-name.schema.json",
+  "title": "CultNet Sample Change Name Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "name"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.sample.change_name.v0" },
+    "name": { "type": "string", "minLength": 1 }
+  }
+}

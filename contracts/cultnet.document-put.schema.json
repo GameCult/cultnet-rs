@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-put.schema.json",
+  "title": "CultNet Document Put Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "document"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.document_put.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "document": {
+      "$ref": "./cultnet.document-record.schema.json"
+    }
+  }
+}

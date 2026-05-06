@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.error.schema.json",
+  "title": "CultNet Error Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "error"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.error.v0" },
+    "error": { "type": "string", "minLength": 1 }
+  }
+}

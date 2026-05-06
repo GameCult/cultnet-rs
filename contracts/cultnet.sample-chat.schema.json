@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.sample-chat.schema.json",
+  "title": "CultNet Sample Chat Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "text"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.sample.chat.v0" },
+    "text": { "type": "string", "minLength": 1 }
+  }
+}

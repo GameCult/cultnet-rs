@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.schema-descriptor.schema.json",
+  "title": "CultNet Schema Descriptor",
+  "type": "object",
+  "required": [
+    "schemaId",
+    "kind",
+    "wireContracts",
+    "contentHash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaId": { "type": "string", "minLength": 1 },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "wire_message",
+        "document_payload",
+        "shared_contract"
+      ]
+    },
+    "schemaVersion": { "type": "string", "minLength": 1 },
+    "documentType": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "wireContracts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "cultnet.schema.v0",
+          "gamecult.networking.v0"
+        ]
+      }
+    },
+    "contentHash": { "type": "string", "minLength": 1 },
+    "schemaJson": { "type": "string", "minLength": 1 }
+  }
+}

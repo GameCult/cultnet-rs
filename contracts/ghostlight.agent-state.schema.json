@@ -1,0 +1,845 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/Ghostlight/schemas/agent-state.schema.json",
+  "title": "Ghostlight Agent State Schema",
+  "description": "First canonical contract for Ghostlight agent, perception, relationship, event, scene, and dialogue-context state.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "world",
+    "agents",
+    "relationships",
+    "events",
+    "scenes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ghostlight.agent_state.v0"
+    },
+    "world": {
+      "$ref": "#/$defs/world_state"
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relationship"
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scene"
+      }
+    }
+  },
+  "$defs": {
+    "world_state": {
+      "type": "object",
+      "required": [
+        "world_id",
+        "setting",
+        "time",
+        "canon_context"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "world_id": {
+          "type": "string"
+        },
+        "setting": {
+          "type": "string"
+        },
+        "time": {
+          "type": "object",
+          "required": [
+            "label"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "label": {
+              "type": "string"
+            }
+          }
+        },
+        "canon_context": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ambient_pressures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pressure"
+          }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "identity",
+        "canonical_state",
+        "goals",
+        "memories",
+        "perceived_state_overlays"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "canonical_state": {
+          "$ref": "#/$defs/canonical_state"
+        },
+        "goals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/goal"
+          }
+        },
+        "memories": {
+          "$ref": "#/$defs/memory_bundle"
+        },
+        "perceived_state_overlays": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/perceived_state_overlay"
+          }
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "name",
+        "roles",
+        "origin",
+        "public_description"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "type": "string"
+        },
+        "public_description": {
+          "type": "string"
+        },
+        "private_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "canonical_state": {
+      "type": "object",
+      "required": [
+        "underlying_organization",
+        "stable_dispositions",
+        "behavioral_dimensions",
+        "presentation_strategy",
+        "voice_style",
+        "situational_state",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "underlying_organization": {
+          "$ref": "#/$defs/variable_map"
+        },
+        "stable_dispositions": {
+          "$ref": "#/$defs/variable_map"
+        },
+        "behavioral_dimensions": {
+          "$ref": "#/$defs/variable_map"
+        },
+        "presentation_strategy": {
+          "$ref": "#/$defs/variable_map"
+        },
+        "situational_state": {
+          "$ref": "#/$defs/variable_map"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/value_commitment"
+          }
+        },
+        "voice_style": {
+          "$ref": "#/$defs/variable_map"
+        }
+      }
+    },
+    "variable_map": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/state_variable"
+      }
+    },
+    "state_variable": {
+      "type": "object",
+      "required": [
+        "mean",
+        "plasticity",
+        "current_activation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mean": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "plasticity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "current_activation": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "value_commitment": {
+      "type": "object",
+      "required": [
+        "value_id",
+        "label",
+        "priority",
+        "unforgivable_if_betrayed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "unforgivable_if_betrayed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "goal": {
+      "type": "object",
+      "required": [
+        "goal_id",
+        "description",
+        "scope",
+        "priority",
+        "emotional_stake",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "goal_id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "immediate",
+            "scene",
+            "case",
+            "arc",
+            "life"
+          ]
+        },
+        "priority": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "emotional_stake": {
+          "type": "string"
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "enum": [
+            "active",
+            "blocked",
+            "dormant",
+            "resolved",
+            "abandoned"
+          ]
+        }
+      }
+    },
+    "memory_bundle": {
+      "type": "object",
+      "required": [
+        "episodic",
+        "semantic",
+        "relationship_summaries"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "episodic": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/memory"
+          }
+        },
+        "semantic": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/memory"
+          }
+        },
+        "relationship_summaries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/memory"
+          }
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "required": [
+        "memory_id",
+        "summary",
+        "salience",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memory_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "salience": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "linked_event_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "linked_relationship_id": {
+          "type": "string"
+        }
+      }
+    },
+    "perceived_state_overlay": {
+      "type": "object",
+      "required": [
+        "observer_agent_id",
+        "target_agent_id",
+        "perceived_dimensions",
+        "beliefs",
+        "distortions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "observer_agent_id": {
+          "type": "string"
+        },
+        "target_agent_id": {
+          "type": "string"
+        },
+        "perceived_dimensions": {
+          "$ref": "#/$defs/inferred_variable_map"
+        },
+        "beliefs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/belief"
+          }
+        },
+        "distortions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "hostile_attribution",
+              "false_reassurance",
+              "overread_warmth",
+              "underread_threat",
+              "false_mask_detection",
+              "missed_mask_detection",
+              "status_injury",
+              "threat_amplification",
+              "institutional_suspicion_transfer",
+              "care_underread",
+              "mask_overfocus"
+            ]
+          }
+        }
+      }
+    },
+    "belief": {
+      "type": "object",
+      "required": [
+        "belief_id",
+        "claim",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "belief_id": {
+          "type": "string"
+        },
+        "claim": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "subject_id": {
+          "type": "string"
+        },
+        "claim_type": {
+          "enum": [
+            "fact",
+            "identity_inference",
+            "motive_inference",
+            "prediction",
+            "norm",
+            "value_read",
+            "relationship_read"
+          ]
+        },
+        "evidence_event_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "visibility": {
+          "enum": [
+            "private",
+            "shared",
+            "public",
+            "rumor"
+          ]
+        },
+        "emotional_charge": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "required": [
+        "relationship_id",
+        "source_id",
+        "target_id",
+        "stance",
+        "summary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "relationship_id": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "stance": {
+          "$ref": "#/$defs/variable_map"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "unresolved_incident_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "event_id",
+        "kind",
+        "summary",
+        "participants",
+        "pressure_tags"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "dialogue",
+            "action",
+            "memory",
+            "relationship_shift",
+            "scene_outcome",
+            "author_note"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pressure_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observed_exchange": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event_exchange_turn"
+          }
+        },
+        "private_interpretations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event_private_interpretation"
+          }
+        },
+        "event_effects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event_effect"
+          }
+        }
+      }
+    },
+    "scene": {
+      "type": "object",
+      "required": [
+        "scene_id",
+        "location",
+        "participants",
+        "public_stakes",
+        "hidden_stakes",
+        "dialogue_context_packs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scene_id": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "public_stakes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hidden_stakes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dialogue_context_packs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dialogue_context_pack"
+          }
+        }
+      }
+    },
+    "dialogue_context_pack": {
+      "type": "object",
+      "required": [
+        "speaker_agent_id",
+        "listener_ids",
+        "speaker_local_truth",
+        "speaker_beliefs",
+        "active_memories",
+        "active_goals",
+        "presentation_constraints"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "speaker_agent_id": {
+          "type": "string"
+        },
+        "listener_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "speaker_local_truth": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "speaker_beliefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "active_memories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "active_goals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "presentation_constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "pressure": {
+      "type": "object",
+      "required": [
+        "pressure_id",
+        "label",
+        "intensity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pressure_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "intensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "inferred_variable_map": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/inferred_state_variable"
+      }
+    },
+    "inferred_state_variable": {
+      "type": "object",
+      "required": [
+        "observed_activation",
+        "attributed_disposition",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "observed_activation": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "attributed_disposition": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "event_exchange_turn": {
+      "type": "object",
+      "required": [
+        "speaker_id",
+        "utterance_summary",
+        "dialogue_function"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "speaker_id": {
+          "type": "string"
+        },
+        "utterance_summary": {
+          "type": "string"
+        },
+        "dialogue_function": {
+          "type": "string"
+        },
+        "observable_cues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "event_private_interpretation": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "interpretation",
+        "confidence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "interpretation": {
+          "type": "string"
+        },
+        "attributed_motive": {
+          "type": "string"
+        },
+        "appraisal_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "event_effect": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "summary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "state_deltas": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/state_delta"
+          }
+        },
+        "new_belief_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "memory_update_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "state_delta": {
+      "type": "object",
+      "required": [
+        "path",
+        "delta"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "delta": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        }
+      }
+    }
+  }
+}

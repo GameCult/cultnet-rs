@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.schema-catalog-response.schema.json",
+  "title": "CultNet Schema Catalog Response Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "schemas"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.schema_catalog_response.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "schemas": {
+      "type": "array",
+      "items": {
+        "$ref": "./cultnet.schema-descriptor.schema.json"
+      }
+    }
+  }
+}

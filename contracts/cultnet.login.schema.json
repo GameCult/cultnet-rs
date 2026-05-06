@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.login.schema.json",
+  "title": "CultNet Login Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "nonce",
+    "auth",
+    "password"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.login.v0" },
+    "nonce": { "type": "string", "minLength": 1 },
+    "auth": { "type": "string", "minLength": 1 },
+    "password": { "type": "string", "minLength": 1 }
+  }
+}

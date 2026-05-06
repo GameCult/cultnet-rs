@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.snapshot-response.schema.json",
+  "title": "CultNet Snapshot Response Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "documents"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.snapshot_response.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "documents": {
+      "type": "array",
+      "items": {
+        "$ref": "./cultnet.document-record.schema.json"
+      }
+    }
+  }
+}

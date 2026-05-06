@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-delete.schema.json",
+  "title": "CultNet Document Delete Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "messageId",
+    "documentType",
+    "documentKey"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.document_delete.v0" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "documentType": { "type": "string", "minLength": 1 },
+    "documentKey": { "type": "string", "minLength": 1 }
+  }
+}

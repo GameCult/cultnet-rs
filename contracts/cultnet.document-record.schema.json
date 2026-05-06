@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-record.schema.json",
+  "title": "CultNet Document Record",
+  "type": "object",
+  "required": [
+    "documentType",
+    "documentKey",
+    "storedAt",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "documentType": { "type": "string", "minLength": 1 },
+    "documentKey": { "type": "string", "minLength": 1 },
+    "storedAt": { "type": "string", "minLength": 1 },
+    "payloadSchemaVersion": { "type": "string", "minLength": 1 },
+    "payload": {},
+    "sourceRuntimeId": { "type": "string", "minLength": 1 },
+    "sourceAgentId": { "type": "string", "minLength": 1 },
+    "sourceRole": { "type": "string", "minLength": 1 },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

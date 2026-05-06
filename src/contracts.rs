@@ -6,10 +6,20 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CultNetWireContract {
+    #[serde(rename = "cultnet.schema.v0")]
     CultNetSchemaV0,
+    #[serde(rename = "gamecult.networking.v0")]
     GameCultNetworkingV0,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CultNetSchemaKind {
+    WireMessage,
+    DocumentPayload,
+    SharedContract,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,6 +42,23 @@ pub struct CultNetDocumentRecord<TPayload = Value> {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetSchemaDescriptor {
+    pub schema_id: String,
+    pub kind: CultNetSchemaKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub wire_contracts: Vec<CultNetWireContract>,
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "schemaVersion")]
 pub enum CultNetMessage {
     #[serde(rename = "cultnet.hello.v0", rename_all = "camelCase")]
@@ -48,6 +75,8 @@ pub enum CultNetMessage {
         supported_document_types: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_message_versions: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_schema_catalog: Option<bool>,
     },
     #[serde(rename = "cultnet.login.v0", rename_all = "camelCase")]
     Login {
@@ -95,6 +124,24 @@ pub enum CultNetMessage {
     SnapshotResponse {
         message_id: String,
         documents: Vec<CultNetDocumentRecord<Value>>,
+    },
+    #[serde(rename = "cultnet.schema_catalog_request.v0", rename_all = "camelCase")]
+    SchemaCatalogRequest {
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_schema_json: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_ids: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kinds: Option<Vec<CultNetSchemaKind>>,
+    },
+    #[serde(
+        rename = "cultnet.schema_catalog_response.v0",
+        rename_all = "camelCase"
+    )]
+    SchemaCatalogResponse {
+        message_id: String,
+        schemas: Vec<CultNetSchemaDescriptor>,
     },
 }
 
@@ -158,6 +205,7 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             display_name,
             supported_document_types,
             supported_message_versions,
+            supports_schema_catalog: _,
         } => {
             require_non_empty(runtime_id, "runtimeId")?;
             require_non_empty(runtime_kind, "runtimeKind")?;
@@ -235,6 +283,24 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
                 validate_document_record(document)?;
             }
         }
+        CultNetMessage::SchemaCatalogRequest {
+            message_id,
+            include_schema_json: _,
+            schema_ids,
+            kinds: _,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            require_optional_string_vec(schema_ids.as_deref(), "schemaIds")?;
+        }
+        CultNetMessage::SchemaCatalogResponse {
+            message_id,
+            schemas,
+        } => {
+            require_non_empty(message_id, "messageId")?;
+            for schema in schemas {
+                validate_schema_descriptor(schema)?;
+            }
+        }
     }
     Ok(())
 }
@@ -251,6 +317,23 @@ fn validate_document_record(document: &CultNetDocumentRecord<Value>) -> Result<(
     require_optional_non_empty(document.source_agent_id.as_deref(), "sourceAgentId")?;
     require_optional_non_empty(document.source_role.as_deref(), "sourceRole")?;
     require_optional_string_vec(document.tags.as_deref(), "tags")?;
+    Ok(())
+}
+
+fn validate_schema_descriptor(schema: &CultNetSchemaDescriptor) -> Result<()> {
+    require_non_empty(&schema.schema_id, "schemaId")?;
+    require_optional_non_empty(schema.schema_version.as_deref(), "schemaVersion")?;
+    require_optional_non_empty(schema.document_type.as_deref(), "documentType")?;
+    require_optional_non_empty(schema.title.as_deref(), "title")?;
+    require_non_empty(&schema.content_hash, "contentHash")?;
+    require_optional_non_empty(schema.schema_json.as_deref(), "schemaJson")?;
+
+    if schema.wire_contracts.is_empty() {
+        return Err(anyhow!(
+            "CultNet field wireContracts must contain at least one supported contract"
+        ));
+    }
+
     Ok(())
 }
 
@@ -321,6 +404,34 @@ fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessa
         6 => Ok(CultNetMessage::SampleChat {
             text: require_legacy_string(payload.first(), "ChatMessage.Text")?,
         }),
+        7 => Ok(CultNetMessage::SchemaCatalogRequest {
+            message_id: require_legacy_string(
+                payload.first(),
+                "SchemaCatalogRequestMessage.MessageId",
+            )?,
+            include_schema_json: Some(require_legacy_bool(
+                payload.get(1),
+                "SchemaCatalogRequestMessage.IncludeSchemaJson",
+            )?),
+            schema_ids: require_legacy_optional_string_array(
+                payload.get(2),
+                "SchemaCatalogRequestMessage.SchemaIds",
+            )?,
+            kinds: require_legacy_optional_schema_kind_array(
+                payload.get(3),
+                "SchemaCatalogRequestMessage.Kinds",
+            )?,
+        }),
+        8 => Ok(CultNetMessage::SchemaCatalogResponse {
+            message_id: require_legacy_string(
+                payload.first(),
+                "SchemaCatalogResponseMessage.MessageId",
+            )?,
+            schemas: require_legacy_schema_descriptor_array(
+                payload.get(1),
+                "SchemaCatalogResponseMessage.Schemas",
+            )?,
+        }),
         _ => Err(anyhow!(
             "Unsupported gamecult.networking.v0 union tag {tag}"
         )),
@@ -387,6 +498,35 @@ fn encode_gamecult_networking_message(message: &CultNetMessage) -> Result<rmpv::
                 rmpv::Value::Array(vec![text.as_str().into()]),
             ]
         }
+        CultNetMessage::SchemaCatalogRequest {
+            message_id,
+            include_schema_json,
+            schema_ids,
+            kinds,
+        } => vec![
+            rmpv::Value::from(7),
+            rmpv::Value::Array(vec![
+                message_id.as_str().into(),
+                rmpv::Value::from(include_schema_json.unwrap_or(false)),
+                legacy_optional_string_array(schema_ids.as_deref()),
+                legacy_optional_schema_kind_array(kinds.as_deref()),
+            ]),
+        ],
+        CultNetMessage::SchemaCatalogResponse {
+            message_id,
+            schemas,
+        } => vec![
+            rmpv::Value::from(8),
+            rmpv::Value::Array(vec![
+                message_id.as_str().into(),
+                rmpv::Value::Array(
+                    schemas
+                        .iter()
+                        .map(legacy_schema_descriptor)
+                        .collect::<Result<Vec<_>>>()?,
+                ),
+            ]),
+        ],
         _ => {
             return Err(anyhow!(
                 "Message is not defined in the gamecult.networking.v0 contract"
@@ -410,9 +550,262 @@ fn require_legacy_string(value: Option<&rmpv::Value>, field_name: &str) -> Resul
     Ok(value.to_string())
 }
 
+fn require_legacy_bool(value: Option<&rmpv::Value>, field_name: &str) -> Result<bool> {
+    value
+        .and_then(rmpv::Value::as_bool)
+        .ok_or_else(|| anyhow!("{field_name} must be a boolean in gamecult.networking.v0"))
+}
+
+fn require_legacy_optional_string_array(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Option<Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(None);
+    }
+    let items = value
+        .as_array()
+        .ok_or_else(|| anyhow!("{field_name} must be an array in gamecult.networking.v0"))?;
+    let values = items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| anyhow!("{field_name} must contain only strings"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(values))
+}
+
+fn require_legacy_optional_schema_kind_array(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Option<Vec<CultNetSchemaKind>>> {
+    let Some(values) = require_legacy_optional_string_array(value, field_name)? else {
+        return Ok(None);
+    };
+    values
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "wire_message" => Ok(CultNetSchemaKind::WireMessage),
+            "document_payload" => Ok(CultNetSchemaKind::DocumentPayload),
+            "shared_contract" => Ok(CultNetSchemaKind::SharedContract),
+            _ => Err(anyhow!("{field_name} has unsupported schema kind {value}")),
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn require_legacy_schema_descriptor_array(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Vec<CultNetSchemaDescriptor>> {
+    let items = value
+        .and_then(rmpv::Value::as_array)
+        .ok_or_else(|| anyhow!("{field_name} must be an array in gamecult.networking.v0"))?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            require_legacy_schema_descriptor(item, &format!("{field_name}[{index}]"))
+        })
+        .collect()
+}
+
+fn require_legacy_schema_descriptor(
+    value: &rmpv::Value,
+    field_name: &str,
+) -> Result<CultNetSchemaDescriptor> {
+    let object = value
+        .as_map()
+        .ok_or_else(|| anyhow!("{field_name} must be an object in gamecult.networking.v0"))?;
+
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+
+    let schema_id = require_legacy_string(get("schemaId"), &format!("{field_name}.SchemaId"))?;
+    let kind = require_legacy_string(get("kind"), &format!("{field_name}.Kind"))?;
+    let schema_version = require_legacy_optional_string(
+        get("schemaVersion"),
+        &format!("{field_name}.SchemaVersion"),
+    )?;
+    let document_type =
+        require_legacy_optional_string(get("documentType"), &format!("{field_name}.DocumentType"))?;
+    let title = require_legacy_optional_string(get("title"), &format!("{field_name}.Title"))?;
+    let wire_contracts = require_legacy_optional_wire_contracts(
+        get("wireContracts"),
+        &format!("{field_name}.WireContracts"),
+    )?;
+    let content_hash =
+        require_legacy_string(get("contentHash"), &format!("{field_name}.ContentHash"))?;
+    let schema_json =
+        require_legacy_optional_string(get("schemaJson"), &format!("{field_name}.SchemaJson"))?;
+
+    let kind = match kind.as_str() {
+        "wire_message" => CultNetSchemaKind::WireMessage,
+        "document_payload" => CultNetSchemaKind::DocumentPayload,
+        "shared_contract" => CultNetSchemaKind::SharedContract,
+        _ => {
+            return Err(anyhow!(
+                "{field_name}.Kind has unsupported schema kind {kind}"
+            ));
+        }
+    };
+
+    Ok(CultNetSchemaDescriptor {
+        schema_id,
+        kind,
+        schema_version,
+        document_type,
+        title,
+        wire_contracts,
+        content_hash,
+        schema_json,
+    })
+}
+
+fn require_legacy_optional_string(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(None);
+    }
+    Ok(Some(require_legacy_string(Some(value), field_name)?))
+}
+
+fn require_legacy_optional_wire_contracts(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Vec<CultNetWireContract>> {
+    let Some(values) = require_legacy_optional_string_array(value, field_name)? else {
+        return Ok(Vec::new());
+    };
+
+    values
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "cultnet.schema.v0" => Ok(CultNetWireContract::CultNetSchemaV0),
+            "gamecult.networking.v0" => Ok(CultNetWireContract::GameCultNetworkingV0),
+            _ => Err(anyhow!(
+                "{field_name} contains unsupported wire contract {value}"
+            )),
+        })
+        .collect()
+}
+
 fn legacy_bytes(input: &str, field_name: &str) -> Result<rmpv::Value> {
     if input.trim().is_empty() {
         return Err(anyhow!("{field_name} must be a non-empty base64url string"));
     }
     Ok(rmpv::Value::Binary(URL_SAFE_NO_PAD.decode(input)?))
+}
+
+fn legacy_optional_string_array(input: Option<&[String]>) -> rmpv::Value {
+    match input {
+        Some(values) => rmpv::Value::Array(
+            values
+                .iter()
+                .map(|value| rmpv::Value::from(value.as_str()))
+                .collect(),
+        ),
+        None => rmpv::Value::Nil,
+    }
+}
+
+fn legacy_optional_schema_kind_array(input: Option<&[CultNetSchemaKind]>) -> rmpv::Value {
+    match input {
+        Some(values) => rmpv::Value::Array(
+            values
+                .iter()
+                .map(|value| {
+                    rmpv::Value::from(match value {
+                        CultNetSchemaKind::WireMessage => "wire_message",
+                        CultNetSchemaKind::DocumentPayload => "document_payload",
+                        CultNetSchemaKind::SharedContract => "shared_contract",
+                    })
+                })
+                .collect(),
+        ),
+        None => rmpv::Value::Nil,
+    }
+}
+
+fn legacy_schema_descriptor(schema: &CultNetSchemaDescriptor) -> Result<rmpv::Value> {
+    Ok(rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("schemaId"),
+            rmpv::Value::from(schema.schema_id.as_str()),
+        ),
+        (
+            rmpv::Value::from("kind"),
+            rmpv::Value::from(match schema.kind {
+                CultNetSchemaKind::WireMessage => "wire_message",
+                CultNetSchemaKind::DocumentPayload => "document_payload",
+                CultNetSchemaKind::SharedContract => "shared_contract",
+            }),
+        ),
+        (
+            rmpv::Value::from("schemaVersion"),
+            schema
+                .schema_version
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("documentType"),
+            schema
+                .document_type
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("title"),
+            schema
+                .title
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("wireContracts"),
+            rmpv::Value::Array(
+                schema
+                    .wire_contracts
+                    .iter()
+                    .map(|value| {
+                        rmpv::Value::from(match value {
+                            CultNetWireContract::CultNetSchemaV0 => "cultnet.schema.v0",
+                            CultNetWireContract::GameCultNetworkingV0 => "gamecult.networking.v0",
+                        })
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            rmpv::Value::from("contentHash"),
+            rmpv::Value::from(schema.content_hash.as_str()),
+        ),
+        (
+            rmpv::Value::from("schemaJson"),
+            schema
+                .schema_json
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+    ]))
 }

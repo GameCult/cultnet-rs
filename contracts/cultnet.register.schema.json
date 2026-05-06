@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.register.schema.json",
+  "title": "CultNet Register Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "nonce",
+    "email",
+    "password",
+    "name"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.register.v0" },
+    "nonce": { "type": "string", "minLength": 1 },
+    "email": { "type": "string", "minLength": 1 },
+    "password": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 }
+  }
+}

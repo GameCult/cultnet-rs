@@ -8,10 +8,13 @@ use cultnet_rs::CultNetDocumentBinding;
 use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
+use cultnet_rs::CultNetSchemaKind;
+use cultnet_rs::CultNetSchemaRegistry;
 use cultnet_rs::CultNetSecret;
 use cultnet_rs::CultNetServerSecurityOptions;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::LengthPrefixedMessageFramer;
+use cultnet_rs::builtin_schema_registry;
 use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_for_wire;
 use cultnet_rs::encode_cultnet_message_to_vec;
@@ -68,6 +71,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
         display_name: Some("Void".to_string()),
         supported_document_types: Some(vec!["ghostlight.agent-state".to_string()]),
         supported_message_versions: None,
+        supports_schema_catalog: Some(true),
     };
     let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
     let frame = encode_frame(&payload)?;
@@ -123,6 +127,7 @@ fn rust_decodes_typescript_generated_cultnet_frames() -> Result<()> {
             display_name: Some("Void".to_string()),
             supported_document_types: Some(vec!["ghostlight.agent-state".to_string()]),
             supported_message_versions: None,
+            supports_schema_catalog: None,
         }
     );
 
@@ -200,5 +205,100 @@ fn client_security_keeps_the_connection_key_visible_without_exposing_cipher_logi
     let options = CultNetClientSecurityOptions::development();
     assert_eq!(options.connection_key, "gamecult-dev-connection-key");
     assert_ne!(options.encryption_key(), [0_u8; 32]);
+    Ok(())
+}
+
+#[test]
+fn builtin_schema_registry_advertises_canonical_ghostlight_schema_without_inline_body_by_default()
+-> Result<()> {
+    let registry = builtin_schema_registry()?;
+    let response = registry.create_catalog_response(&CultNetMessage::SchemaCatalogRequest {
+        message_id: "catalog-1".to_string(),
+        include_schema_json: None,
+        schema_ids: None,
+        kinds: None,
+    })?;
+
+    let CultNetMessage::SchemaCatalogResponse { schemas, .. } = response else {
+        panic!("expected catalog response");
+    };
+
+    let ghostlight = schemas
+        .iter()
+        .find(|schema| schema.document_type.as_deref() == Some("ghostlight.agent-state"))
+        .expect("ghostlight agent-state schema is advertised");
+
+    assert_eq!(ghostlight.kind, CultNetSchemaKind::DocumentPayload);
+    assert_eq!(
+        ghostlight.schema_version.as_deref(),
+        Some("ghostlight.agent_state.v0")
+    );
+    assert_eq!(ghostlight.schema_json, None);
+    assert!(!ghostlight.content_hash.is_empty());
+    Ok(())
+}
+
+#[test]
+fn schema_discovery_round_trips_over_legacy_gamecult_contract_when_inline_schemas_are_requested()
+-> Result<()> {
+    let registry = {
+        let mut registry = CultNetSchemaRegistry::new();
+        registry.register(cultnet_rs::CultNetSchemaRegistration {
+            schema_id: "https://example.test/contracts/example.schema.json".to_string(),
+            kind: CultNetSchemaKind::SharedContract,
+            wire_contracts: vec![
+                CultNetWireContract::CultNetSchemaV0,
+                CultNetWireContract::GameCultNetworkingV0,
+            ],
+            schema_version: None,
+            document_type: None,
+            title: Some("Example Schema".to_string()),
+            schema_json: Some(
+                r#"{
+                    "$schema":"https://json-schema.org/draft/2020-12/schema",
+                    "$id":"https://example.test/contracts/example.schema.json",
+                    "title":"Example Schema",
+                    "type":"object",
+                    "properties":{"value":{"type":"string"}},
+                    "required":["value"],
+                    "additionalProperties":false
+                }"#
+                .to_string(),
+            ),
+        })?;
+        registry
+    };
+
+    let response = registry.create_catalog_response(&CultNetMessage::SchemaCatalogRequest {
+        message_id: "catalog-legacy".to_string(),
+        include_schema_json: Some(true),
+        schema_ids: None,
+        kinds: None,
+    })?;
+    let wire =
+        encode_cultnet_message_for_wire(&response, CultNetWireContract::GameCultNetworkingV0)?;
+    let bytes = rmp_serde::to_vec(&wire)?;
+    let decoded =
+        decode_cultnet_message_from_slice(&bytes, CultNetWireContract::GameCultNetworkingV0)?;
+
+    let CultNetMessage::SchemaCatalogResponse {
+        message_id,
+        schemas,
+    } = decoded
+    else {
+        panic!("expected legacy schema catalog response");
+    };
+
+    assert_eq!(message_id, "catalog-legacy");
+    assert_eq!(
+        schemas[0].schema_id,
+        "https://example.test/contracts/example.schema.json"
+    );
+    assert!(
+        schemas[0]
+            .schema_json
+            .as_deref()
+            .is_some_and(|schema| schema.contains("\"value\""))
+    );
     Ok(())
 }

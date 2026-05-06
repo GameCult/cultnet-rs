@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.verify.schema.json",
+  "title": "CultNet Verify Message",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "nonce",
+    "session"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.verify.v0" },
+    "nonce": { "type": "string", "minLength": 1 },
+    "session": { "type": "string", "minLength": 1 }
+  }
+}
