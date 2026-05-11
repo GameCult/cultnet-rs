@@ -11,11 +11,11 @@
   "properties": {
     "schemaVersion": { "const": "cultnet.snapshot_request.v0" },
     "messageId": { "type": "string", "minLength": 1 },
-    "documentTypes": {
+    "schemaIds": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     },
-    "documentKeys": {
+    "recordKeys": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     }

@@ -6,14 +6,14 @@
   "required": [
     "schemaVersion",
     "messageId",
-    "documentType",
-    "documentKey"
+    "schemaId",
+    "recordKey"
   ],
   "additionalProperties": false,
   "properties": {
     "schemaVersion": { "const": "cultnet.document_delete.v0" },
     "messageId": { "type": "string", "minLength": 1 },
-    "documentType": { "type": "string", "minLength": 1 },
-    "documentKey": { "type": "string", "minLength": 1 }
+    "schemaId": { "type": "string", "minLength": 1 },
+    "recordKey": { "type": "string", "minLength": 1 }
   }
 }

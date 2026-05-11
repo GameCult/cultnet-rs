@@ -201,6 +201,13 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
+            include_str!("../contracts/cultnet.document-mutation-contract.schema.json"),
+            CultNetSchemaKind::SharedContract,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            None,
+            None,
+        )?,
+        schema_registration(
             include_str!("../contracts/cultnet.login.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![

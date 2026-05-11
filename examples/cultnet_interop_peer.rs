@@ -138,7 +138,7 @@ fn serve(config: PeerConfig) -> Result<()> {
 
     let mut document_registry = CultNetDocumentRegistry::new();
     document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(
-        Some(INTEROP_SCHEMA_VERSION.to_string()),
+        INTEROP_SCHEMA_VERSION.to_string(),
     ));
 
     let cache = Arc::new(Mutex::new(cache));
@@ -252,7 +252,7 @@ fn dial(config: DialConfig) -> Result<()> {
 
     let mut document_registry = CultNetDocumentRegistry::new();
     document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(
-        Some(INTEROP_SCHEMA_VERSION.to_string()),
+        INTEROP_SCHEMA_VERSION.to_string(),
     ));
 
     let mut stream = TcpStream::connect((config.target_host.as_str(), config.target_port))
@@ -306,8 +306,8 @@ fn dial(config: DialConfig) -> Result<()> {
         &mut stream,
         &CultNetMessage::SnapshotRequest {
             message_id: format!("{}-snapshot", config.runtime_id),
-            document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
-            document_keys: None,
+            schema_ids: Some(vec![schema_registration.schema_id.clone()]),
+            record_keys: None,
         },
     )?;
     let snapshot_response = read_message(&mut stream)?;
@@ -454,14 +454,14 @@ fn handle_connection(
             }
             CultNetMessage::SnapshotRequest {
                 message_id,
-                document_types,
-                document_keys,
+                schema_ids,
+                record_keys,
             } => {
                 let mut response = document_registry.create_raw_snapshot_response(
                     &cache.lock().expect("cache poisoned"),
                     message_id,
-                    document_types.as_deref(),
-                    document_keys.as_deref(),
+                    schema_ids.as_deref(),
+                    record_keys.as_deref(),
                 )?;
                 if let CultNetMessage::SnapshotResponseRaw { documents, .. } = &mut response {
                     for document in documents.iter_mut() {

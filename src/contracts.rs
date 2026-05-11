@@ -31,11 +31,9 @@ pub enum CultNetRawPayloadEncoding {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CultNetDocumentRecord<TPayload = Value> {
-    pub document_type: String,
-    pub document_key: String,
+    pub schema_id: String,
+    pub record_key: String,
     pub stored_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_schema_version: Option<String>,
     pub payload: TPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_runtime_id: Option<String>,
@@ -86,11 +84,9 @@ pub struct CultNetDocumentMutationContract {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CultNetRawDocumentRecord {
-    pub document_type: String,
-    pub document_key: String,
+    pub schema_id: String,
+    pub record_key: String,
     pub stored_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_schema_version: Option<String>,
     pub payload_encoding: CultNetRawPayloadEncoding,
     #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
@@ -174,8 +170,8 @@ pub enum CultNetMessage {
     #[serde(rename = "cultnet.document_delete.v0", rename_all = "camelCase")]
     DocumentDelete {
         message_id: String,
-        document_type: String,
-        document_key: String,
+        schema_id: String,
+        record_key: String,
     },
     #[serde(rename = "cultnet.document_put_raw.v0", rename_all = "camelCase")]
     DocumentPutRaw {
@@ -186,9 +182,9 @@ pub enum CultNetMessage {
     SnapshotRequest {
         message_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        document_types: Option<Vec<String>>,
+        schema_ids: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        document_keys: Option<Vec<String>>,
+        record_keys: Option<Vec<String>>,
     },
     #[serde(rename = "cultnet.snapshot_response.v0", rename_all = "camelCase")]
     SnapshotResponse {
@@ -349,12 +345,12 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
         }
         CultNetMessage::DocumentDelete {
             message_id,
-            document_type,
-            document_key,
+            schema_id,
+            record_key,
         } => {
             require_non_empty(message_id, "messageId")?;
-            require_non_empty(document_type, "documentType")?;
-            require_non_empty(document_key, "documentKey")?;
+            require_non_empty(schema_id, "schemaId")?;
+            require_non_empty(record_key, "recordKey")?;
         }
         CultNetMessage::DocumentPutRaw {
             message_id,
@@ -365,12 +361,12 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
         }
         CultNetMessage::SnapshotRequest {
             message_id,
-            document_types,
-            document_keys,
+            schema_ids,
+            record_keys,
         } => {
             require_non_empty(message_id, "messageId")?;
-            require_optional_string_vec(document_types.as_deref(), "documentTypes")?;
-            require_optional_string_vec(document_keys.as_deref(), "documentKeys")?;
+            require_optional_string_vec(schema_ids.as_deref(), "schemaIds")?;
+            require_optional_string_vec(record_keys.as_deref(), "recordKeys")?;
         }
         CultNetMessage::SnapshotResponse {
             message_id,
@@ -437,13 +433,9 @@ fn validate_mutation_contract(contract: &CultNetDocumentMutationContract) -> Res
 }
 
 fn validate_document_record(document: &CultNetDocumentRecord<Value>) -> Result<()> {
-    require_non_empty(&document.document_type, "documentType")?;
-    require_non_empty(&document.document_key, "documentKey")?;
+    require_non_empty(&document.schema_id, "schemaId")?;
+    require_non_empty(&document.record_key, "recordKey")?;
     require_non_empty(&document.stored_at, "storedAt")?;
-    require_optional_non_empty(
-        document.payload_schema_version.as_deref(),
-        "payloadSchemaVersion",
-    )?;
     require_optional_non_empty(document.source_runtime_id.as_deref(), "sourceRuntimeId")?;
     require_optional_non_empty(document.source_agent_id.as_deref(), "sourceAgentId")?;
     require_optional_non_empty(document.source_role.as_deref(), "sourceRole")?;
@@ -452,13 +444,9 @@ fn validate_document_record(document: &CultNetDocumentRecord<Value>) -> Result<(
 }
 
 fn validate_raw_document_record(document: &CultNetRawDocumentRecord) -> Result<()> {
-    require_non_empty(&document.document_type, "documentType")?;
-    require_non_empty(&document.document_key, "documentKey")?;
+    require_non_empty(&document.schema_id, "schemaId")?;
+    require_non_empty(&document.record_key, "recordKey")?;
     require_non_empty(&document.stored_at, "storedAt")?;
-    require_optional_non_empty(
-        document.payload_schema_version.as_deref(),
-        "payloadSchemaVersion",
-    )?;
     if document.payload.is_empty() {
         return Err(anyhow!(
             "CultNet field payload must contain non-empty MessagePack bytes"
@@ -630,19 +618,9 @@ fn require_raw_document_record(
     )?;
 
     Ok(CultNetRawDocumentRecord {
-        document_type: require_legacy_string(
-            get("documentType"),
-            &format!("{field_name}.documentType"),
-        )?,
-        document_key: require_legacy_string(
-            get("documentKey"),
-            &format!("{field_name}.documentKey"),
-        )?,
+        schema_id: require_legacy_string(get("schemaId"), &format!("{field_name}.schemaId"))?,
+        record_key: require_legacy_string(get("recordKey"), &format!("{field_name}.recordKey"))?,
         stored_at: require_legacy_string(get("storedAt"), &format!("{field_name}.storedAt"))?,
-        payload_schema_version: require_legacy_optional_string(
-            get("payloadSchemaVersion"),
-            &format!("{field_name}.payloadSchemaVersion"),
-        )?,
         payload_encoding: match payload_encoding.as_str() {
             "messagepack" => CultNetRawPayloadEncoding::Messagepack,
             _ => {
@@ -674,24 +652,16 @@ fn require_raw_document_record(
 fn encode_raw_document_record(document: &CultNetRawDocumentRecord) -> rmpv::Value {
     rmpv::Value::Map(vec![
         (
-            rmpv::Value::from("documentType"),
-            rmpv::Value::from(document.document_type.as_str()),
+            rmpv::Value::from("schemaId"),
+            rmpv::Value::from(document.schema_id.as_str()),
         ),
         (
-            rmpv::Value::from("documentKey"),
-            rmpv::Value::from(document.document_key.as_str()),
+            rmpv::Value::from("recordKey"),
+            rmpv::Value::from(document.record_key.as_str()),
         ),
         (
             rmpv::Value::from("storedAt"),
             rmpv::Value::from(document.stored_at.as_str()),
-        ),
-        (
-            rmpv::Value::from("payloadSchemaVersion"),
-            document
-                .payload_schema_version
-                .as_deref()
-                .map(rmpv::Value::from)
-                .unwrap_or(rmpv::Value::Nil),
         ),
         (
             rmpv::Value::from("payloadEncoding"),

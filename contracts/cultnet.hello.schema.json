@@ -20,6 +20,12 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     },
+    "supportedMutationContracts": {
+      "type": "array",
+      "items": {
+        "$ref": "./cultnet.document-mutation-contract.schema.json"
+      }
+    },
     "supportedMessageVersions": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 }

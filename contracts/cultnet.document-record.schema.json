@@ -4,17 +4,16 @@
   "title": "CultNet Document Record",
   "type": "object",
   "required": [
-    "documentType",
-    "documentKey",
+    "schemaId",
+    "recordKey",
     "storedAt",
     "payload"
   ],
   "additionalProperties": false,
   "properties": {
-    "documentType": { "type": "string", "minLength": 1 },
-    "documentKey": { "type": "string", "minLength": 1 },
+    "schemaId": { "type": "string", "minLength": 1 },
+    "recordKey": { "type": "string", "minLength": 1 },
     "storedAt": { "type": "string", "minLength": 1 },
-    "payloadSchemaVersion": { "type": "string", "minLength": 1 },
     "payload": {},
     "sourceRuntimeId": { "type": "string", "minLength": 1 },
     "sourceAgentId": { "type": "string", "minLength": 1 },

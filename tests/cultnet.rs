@@ -187,9 +187,9 @@ fn document_registry_advertises_mutation_contracts_with_bindings() -> Result<()>
         ]),
     };
     registry.register(
-        CultNetDocumentBinding::for_entry::<GhostlightAgentStateFixture>(Some(
+        CultNetDocumentBinding::for_entry::<GhostlightAgentStateFixture>(
             "ghostlight.agent_state.v0".to_string(),
-        ))
+        )
         .with_mutation_contract(contract.clone()),
     );
 
@@ -211,7 +211,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry::<
         GhostlightAgentStateFixture,
-    >(Some("ghostlight.agent_state.v0".to_string())));
+    >("ghostlight.agent_state.v0".to_string()));
 
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
@@ -262,7 +262,7 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry::<
         GhostlightAgentStateFixture,
-    >(Some("ghostlight.agent_state.v0".to_string())));
+    >("ghostlight.agent_state.v0".to_string()));
 
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;

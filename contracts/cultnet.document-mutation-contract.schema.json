@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.document-mutation-contract.schema.json",
+  "title": "CultNet Document Mutation Contract",
+  "type": "object",
+  "required": [
+    "documentType",
+    "operations",
+    "authority"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "documentType": { "type": "string", "minLength": 1 },
+    "payloadSchemaVersion": { "type": "string", "minLength": 1 },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["snapshot", "documentPut", "documentDelete", "intentSubmit", "receiptWatch"]
+      }
+    },
+    "authority": {
+      "type": "string",
+      "enum": ["readOnly", "localUser", "coordinator", "runtime", "denied"]
+    },
+    "intentDocumentTypes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "receiptDocumentTypes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

@@ -27,16 +27,16 @@ pub struct CultNetDocumentPutOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetDocumentBinding {
+    pub schema_id: String,
     pub document_type: String,
-    pub payload_schema_version: Option<String>,
     pub mutation_contract: Option<CultNetDocumentMutationContract>,
 }
 
 impl CultNetDocumentBinding {
-    pub fn for_entry<T: DatabaseEntry>(payload_schema_version: impl Into<Option<String>>) -> Self {
+    pub fn for_entry<T: DatabaseEntry>(schema_id: impl Into<String>) -> Self {
         Self {
+            schema_id: schema_id.into(),
             document_type: T::TYPE.to_string(),
-            payload_schema_version: payload_schema_version.into(),
             mutation_contract: None,
         }
     }
@@ -49,7 +49,8 @@ impl CultNetDocumentBinding {
 
 #[derive(Clone, Debug, Default)]
 pub struct CultNetDocumentRegistry {
-    bindings: BTreeMap<String, CultNetDocumentBinding>,
+    bindings_by_type: BTreeMap<String, CultNetDocumentBinding>,
+    bindings_by_schema_id: BTreeMap<String, CultNetDocumentBinding>,
 }
 
 impl CultNetDocumentRegistry {
@@ -58,16 +59,23 @@ impl CultNetDocumentRegistry {
     }
 
     pub fn register(&mut self, binding: CultNetDocumentBinding) -> &mut Self {
-        self.bindings.insert(binding.document_type.clone(), binding);
+        self.bindings_by_schema_id
+            .insert(binding.schema_id.clone(), binding.clone());
+        self.bindings_by_type
+            .insert(binding.document_type.clone(), binding);
         self
     }
 
     pub fn binding(&self, document_type: &str) -> Option<&CultNetDocumentBinding> {
-        self.bindings.get(document_type)
+        self.bindings_by_type.get(document_type)
+    }
+
+    pub fn binding_by_schema_id(&self, schema_id: &str) -> Option<&CultNetDocumentBinding> {
+        self.bindings_by_schema_id.get(schema_id)
     }
 
     pub fn mutation_contracts(&self) -> Vec<CultNetDocumentMutationContract> {
-        self.bindings
+        self.bindings_by_type
             .values()
             .filter_map(|binding| binding.mutation_contract.clone())
             .collect()
@@ -76,7 +84,7 @@ impl CultNetDocumentRegistry {
     pub fn create_document_put_message<T>(
         &self,
         message_id: impl Into<String>,
-        document_key: impl Into<String>,
+        record_key: impl Into<String>,
         value: &T,
         options: CultNetDocumentPutOptions,
     ) -> Result<CultNetMessage>
@@ -88,10 +96,9 @@ impl CultNetDocumentRegistry {
         Ok(CultNetMessage::DocumentPut {
             message_id: message_id.into(),
             document: CultNetDocumentRecord {
-                document_type: binding.document_type.clone(),
-                document_key: document_key.into(),
+                schema_id: binding.schema_id.clone(),
+                record_key: record_key.into(),
                 stored_at: options.stored_at.unwrap_or_else(now_utc_second),
-                payload_schema_version: binding.payload_schema_version.clone(),
                 payload,
                 source_runtime_id: options.source_runtime_id,
                 source_agent_id: options.source_agent_id,
@@ -104,13 +111,13 @@ impl CultNetDocumentRegistry {
     pub fn create_document_delete_message(
         &self,
         message_id: impl Into<String>,
-        document_type: impl Into<String>,
-        document_key: impl Into<String>,
+        schema_id: impl Into<String>,
+        record_key: impl Into<String>,
     ) -> CultNetMessage {
         CultNetMessage::DocumentDelete {
             message_id: message_id.into(),
-            document_type: document_type.into(),
-            document_key: document_key.into(),
+            schema_id: schema_id.into(),
+            record_key: record_key.into(),
         }
     }
 
@@ -129,20 +136,22 @@ impl CultNetDocumentRegistry {
         &self,
         cache: &CultCache,
         message_id: impl Into<String>,
-        document_types: Option<&[String]>,
-        document_keys: Option<&[String]>,
+        schema_ids: Option<&[String]>,
+        record_keys: Option<&[String]>,
     ) -> Result<CultNetMessage> {
-        let requested_types = document_types.map(|items| items.iter().collect::<BTreeSet<_>>());
-        let requested_keys = document_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
+        let requested_schema_ids = schema_ids.map(|items| items.iter().collect::<BTreeSet<_>>());
+        let requested_record_keys =
+            record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
         let mut documents = Vec::new();
         for envelope in cache.snapshot() {
-            if requested_types
+            let binding = self.require_binding(&envelope.r#type)?;
+            if requested_schema_ids
                 .as_ref()
-                .is_some_and(|types| !types.contains(&envelope.r#type))
+                .is_some_and(|ids| !ids.contains(&binding.schema_id))
             {
                 continue;
             }
-            if requested_keys
+            if requested_record_keys
                 .as_ref()
                 .is_some_and(|keys| !keys.contains(&envelope.key))
             {
@@ -160,20 +169,22 @@ impl CultNetDocumentRegistry {
         &self,
         cache: &CultCache,
         message_id: impl Into<String>,
-        document_types: Option<&[String]>,
-        document_keys: Option<&[String]>,
+        schema_ids: Option<&[String]>,
+        record_keys: Option<&[String]>,
     ) -> Result<CultNetMessage> {
-        let requested_types = document_types.map(|items| items.iter().collect::<BTreeSet<_>>());
-        let requested_keys = document_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
+        let requested_schema_ids = schema_ids.map(|items| items.iter().collect::<BTreeSet<_>>());
+        let requested_record_keys =
+            record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
         let mut documents = Vec::new();
         for envelope in cache.snapshot() {
-            if requested_types
+            let binding = self.require_binding(&envelope.r#type)?;
+            if requested_schema_ids
                 .as_ref()
-                .is_some_and(|types| !types.contains(&envelope.r#type))
+                .is_some_and(|ids| !ids.contains(&binding.schema_id))
             {
                 continue;
             }
-            if requested_keys
+            if requested_record_keys
                 .as_ref()
                 .is_some_and(|keys| !keys.contains(&envelope.key))
             {
@@ -198,22 +209,23 @@ impl CultNetDocumentRegistry {
         let CultNetMessage::DocumentPut { document, .. } = message else {
             return Err(anyhow!("expected cultnet.document_put.v0"));
         };
-        if document.document_type != T::TYPE {
+        let binding = self.require_binding(T::TYPE)?;
+        if document.schema_id != binding.schema_id {
             return Err(anyhow!(
-                "document type {:?} does not match registered Rust type {:?}",
-                document.document_type,
-                T::TYPE
+                "schema id {:?} does not match registered Rust type {:?} schema {:?}",
+                document.schema_id,
+                T::TYPE,
+                binding.schema_id
             ));
         }
-        self.require_binding(T::TYPE)?;
         let value: T = serde_json::from_value(document.payload.clone()).with_context(|| {
             format!(
-                "failed to decode CultNet payload {:?} as {}",
-                T::TYPE,
+                "failed to decode CultNet payload schema {:?} as {}",
+                binding.schema_id,
                 T::SCHEMA_NAME
             )
         })?;
-        cache.put(&document.document_key, &value)
+        cache.put(&document.record_key, &value)
     }
 
     pub fn apply_document_delete_message<T>(
@@ -225,22 +237,23 @@ impl CultNetDocumentRegistry {
         T: DatabaseEntry,
     {
         let CultNetMessage::DocumentDelete {
-            document_type,
-            document_key,
+            schema_id,
+            record_key,
             ..
         } = message
         else {
             return Err(anyhow!("expected cultnet.document_delete.v0"));
         };
-        if document_type != T::TYPE {
+        let binding = self.require_binding(T::TYPE)?;
+        if schema_id != &binding.schema_id {
             return Err(anyhow!(
-                "document type {:?} does not match registered Rust type {:?}",
-                document_type,
-                T::TYPE
+                "schema id {:?} does not match registered Rust type {:?} schema {:?}",
+                schema_id,
+                T::TYPE,
+                binding.schema_id
             ));
         }
-        self.require_binding(T::TYPE)?;
-        cache.delete::<T>(document_key)
+        cache.delete::<T>(record_key)
     }
 
     pub fn apply_raw_document_put_message<T>(
@@ -254,17 +267,18 @@ impl CultNetDocumentRegistry {
         let CultNetMessage::DocumentPutRaw { document, .. } = message else {
             return Err(anyhow!("expected cultnet.document_put_raw.v0"));
         };
-        if document.document_type != T::TYPE {
+        let binding = self.require_binding(T::TYPE)?;
+        if document.schema_id != binding.schema_id {
             return Err(anyhow!(
-                "document type {:?} does not match registered Rust type {:?}",
-                document.document_type,
-                T::TYPE
+                "schema id {:?} does not match registered Rust type {:?} schema {:?}",
+                document.schema_id,
+                T::TYPE,
+                binding.schema_id
             ));
         }
-        self.require_binding(T::TYPE)?;
         cache.put_envelope::<T>(CultCacheEnvelope {
-            key: document.document_key.clone(),
-            r#type: document.document_type.clone(),
+            key: document.record_key.clone(),
+            r#type: T::TYPE.to_string(),
             payload: document.payload.clone(),
             stored_at: document.stored_at.clone(),
         })
@@ -282,8 +296,9 @@ impl CultNetDocumentRegistry {
             return Err(anyhow!("expected cultnet.snapshot_response.v0"));
         };
         let mut applied = Vec::new();
+        let binding = self.require_binding(T::TYPE)?;
         for document in documents {
-            if document.document_type != T::TYPE {
+            if document.schema_id != binding.schema_id {
                 continue;
             }
             applied.push(self.apply_document_put_message::<T>(
@@ -309,8 +324,9 @@ impl CultNetDocumentRegistry {
             return Err(anyhow!("expected cultnet.snapshot_response_raw.v0"));
         };
         let mut applied = Vec::new();
+        let binding = self.require_binding(T::TYPE)?;
         for document in documents {
-            if document.document_type != T::TYPE {
+            if document.schema_id != binding.schema_id {
                 continue;
             }
             applied.push(self.apply_raw_document_put_message::<T>(
@@ -336,10 +352,9 @@ impl CultNetDocumentRegistry {
             )
         })?;
         Ok(CultNetDocumentRecord {
-            document_type: envelope.r#type.clone(),
-            document_key: envelope.key.clone(),
+            schema_id: binding.schema_id.clone(),
+            record_key: envelope.key.clone(),
             stored_at: envelope.stored_at.clone(),
-            payload_schema_version: binding.payload_schema_version.clone(),
             payload,
             source_runtime_id: None,
             source_agent_id: None,
@@ -354,10 +369,9 @@ impl CultNetDocumentRegistry {
     ) -> Result<CultNetRawDocumentRecord> {
         let binding = self.require_binding(&envelope.r#type)?;
         Ok(CultNetRawDocumentRecord {
-            document_type: envelope.r#type.clone(),
-            document_key: envelope.key.clone(),
+            schema_id: binding.schema_id.clone(),
+            record_key: envelope.key.clone(),
             stored_at: envelope.stored_at.clone(),
-            payload_schema_version: binding.payload_schema_version.clone(),
             payload_encoding: CultNetRawPayloadEncoding::Messagepack,
             payload: envelope.payload.clone(),
             source_runtime_id: None,
