@@ -5,8 +5,12 @@ use cultcache_rs::CultCache;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 use cultnet_rs::CultNetDocumentBinding;
+use cultnet_rs::CultNetDocumentMutationContract;
+use cultnet_rs::CultNetDocumentOperation;
+use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
+use cultnet_rs::CultNetMutationAuthority;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
@@ -38,6 +42,18 @@ use std::time::Duration;
 
 const INTEROP_DOCUMENT_TYPE: &str = "cultnet.interop-note";
 const INTEROP_SCHEMA_VERSION: &str = "cultnet.interop_note.v0";
+const MUTATION_INTENT_TYPE: &str = "cultnet.interop-note-mutation-intent";
+const MUTATION_INTENT_SCHEMA_ID: &str = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-intent.schema.json";
+const MUTATION_INTENT_SCHEMA_VERSION: &str = "cultnet.interop_note_mutation_intent.v0";
+const MUTATION_RECEIPT_TYPE: &str = "cultnet.interop-note-mutation-receipt";
+const MUTATION_RECEIPT_SCHEMA_ID: &str = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-note-mutation-receipt.schema.json";
+const MUTATION_RECEIPT_SCHEMA_VERSION: &str = "cultnet.interop_note_mutation_receipt.v0";
+const FIRE_COMMAND_TYPE: &str = "cultnet.interop-fire-weapon-command";
+const FIRE_COMMAND_SCHEMA_ID: &str = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-command.schema.json";
+const FIRE_COMMAND_SCHEMA_VERSION: &str = "cultnet.interop_fire_weapon_command.v0";
+const FIRE_RECEIPT_TYPE: &str = "cultnet.interop-fire-weapon-receipt";
+const FIRE_RECEIPT_SCHEMA_ID: &str = "https://github.com/GameCult/cultnet-ts/integration/contracts/cultnet.interop-fire-weapon-receipt.schema.json";
+const FIRE_RECEIPT_SCHEMA_VERSION: &str = "cultnet.interop_fire_weapon_receipt.v0";
 const DISCOVERY_ANNOUNCE_SCHEMA_VERSION: &str = "cultnet.discovery_announce.v0";
 
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
@@ -55,6 +71,82 @@ struct CultNetInteropNote {
     body: String,
     #[cultcache(key = 5)]
     tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "cultnet.interop-note-mutation-intent",
+    schema = "CultNetInteropMutationIntent"
+)]
+struct CultNetInteropMutationIntent {
+    #[cultcache(key = 0)]
+    schema_version: String,
+    #[cultcache(key = 1)]
+    intent_id: String,
+    #[cultcache(key = 2)]
+    target_document_id: String,
+    #[cultcache(key = 3)]
+    append_body: String,
+    #[cultcache(key = 4)]
+    append_tag: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "cultnet.interop-note-mutation-receipt",
+    schema = "CultNetInteropMutationReceipt"
+)]
+struct CultNetInteropMutationReceipt {
+    #[cultcache(key = 0)]
+    schema_version: String,
+    #[cultcache(key = 1)]
+    intent_id: String,
+    #[cultcache(key = 2)]
+    accepted: bool,
+    #[cultcache(key = 3)]
+    document_id: String,
+    #[cultcache(key = 4)]
+    body: String,
+    #[cultcache(key = 5)]
+    tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "cultnet.interop-fire-weapon-command",
+    schema = "CultNetInteropFireCommand"
+)]
+struct CultNetInteropFireCommand {
+    #[cultcache(key = 0)]
+    schema_version: String,
+    #[cultcache(key = 1)]
+    command_id: String,
+    #[cultcache(key = 2)]
+    character_id: String,
+    #[cultcache(key = 3)]
+    weapon_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "cultnet.interop-fire-weapon-receipt",
+    schema = "CultNetInteropFireReceipt"
+)]
+struct CultNetInteropFireReceipt {
+    #[cultcache(key = 0)]
+    schema_version: String,
+    #[cultcache(key = 1)]
+    command_id: String,
+    #[cultcache(key = 2)]
+    accepted: bool,
+    #[cultcache(key = 3)]
+    character_id: String,
+    #[cultcache(key = 4)]
+    weapon_id: String,
+    #[cultcache(key = 5)]
+    shots_fired: u32,
+    #[cultcache(key = 6)]
+    ammo_remaining: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,6 +221,7 @@ fn serve(config: PeerConfig) -> Result<()> {
 
     let mut cache = CultCache::new();
     cache.register_entry_type::<CultNetInteropNote>()?;
+    register_capability_entry_types(&mut cache)?;
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(runtime_store_path(
         &config.runtime_id,
     )));
@@ -137,12 +230,7 @@ fn serve(config: PeerConfig) -> Result<()> {
     cache.put(&note.document_id, &note)?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    document_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
-        CultNetInteropNote,
-    >(
-        schema_registration.schema_id.clone(),
-        INTEROP_SCHEMA_VERSION.to_string(),
-    ));
+    register_capability_bindings(&mut document_registry, &schema_registration.schema_id);
 
     let cache = Arc::new(Mutex::new(cache));
     let document_registry = Arc::new(document_registry);
@@ -248,18 +336,14 @@ fn dial(config: DialConfig) -> Result<()> {
 
     let mut cache = CultCache::new();
     cache.register_entry_type::<CultNetInteropNote>()?;
+    register_capability_entry_types(&mut cache)?;
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(runtime_store_path(
         &format!("{}-dial", config.runtime_id),
     )));
     cache.pull_all_backing_stores()?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    document_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
-        CultNetInteropNote,
-    >(
-        schema_registration.schema_id.clone(),
-        INTEROP_SCHEMA_VERSION.to_string(),
-    ));
+    register_capability_bindings(&mut document_registry, &schema_registration.schema_id);
 
     let mut stream = TcpStream::connect((config.target_host.as_str(), config.target_port))
         .with_context(|| {
@@ -278,7 +362,7 @@ fn dial(config: DialConfig) -> Result<()> {
             role: None,
             display_name: Some(config.display_name.clone()),
             supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
-            supported_mutation_contracts: None,
+            supported_mutation_contracts: Some(interaction_contracts()),
             supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
             supports_schema_catalog: Some(true),
         },
@@ -342,8 +426,86 @@ fn dial(config: DialConfig) -> Result<()> {
             "body": note.body,
             "tags": note.tags,
         },
+        "mutatedNote": mutate_remote_note(&mut stream, &mut cache, &document_registry, &schema_registration.schema_id, &config.runtime_id, &note)?,
+        "fireReceipt": fire_remote_weapon(&mut stream, &mut cache, &document_registry, &config.runtime_id, &remote_runtime_id)?,
     }))?;
     Ok(())
+}
+
+fn mutate_remote_note(
+    stream: &mut TcpStream,
+    cache: &mut CultCache,
+    document_registry: &CultNetDocumentRegistry,
+    note_schema_id: &str,
+    runtime_id: &str,
+    note: &CultNetInteropNote,
+) -> Result<serde_json::Value> {
+    let intent = CultNetInteropMutationIntent {
+        schema_version: MUTATION_INTENT_SCHEMA_VERSION.to_string(),
+        intent_id: format!("{runtime_id}-decorate"),
+        target_document_id: note.document_id.clone(),
+        append_body: format!(" Decorated by {runtime_id}."),
+        append_tag: format!("decorated:{runtime_id}"),
+    };
+    let message = document_registry.create_raw_document_put_message(
+        format!("{runtime_id}-decorate-put"),
+        intent.intent_id.clone(),
+        &intent,
+        CultNetDocumentPutOptions::default(),
+    )?;
+    send_message(stream, &message)?;
+
+    let receipt_message = read_message(stream)?;
+    let _receipt = document_registry
+        .apply_raw_document_put_message::<CultNetInteropMutationReceipt>(cache, &receipt_message)?;
+    let mutated_message = read_message(stream)?;
+    let mutated = document_registry
+        .apply_raw_document_put_message::<CultNetInteropNote>(cache, &mutated_message)?;
+    if mutated_message_schema_id(&mutated_message) != Some(note_schema_id) {
+        return Err(anyhow!("mutation response used the wrong schema id"));
+    }
+    Ok(serde_json::json!({
+        "schemaVersion": mutated.schema_version,
+        "documentId": mutated.document_id,
+        "authorRuntimeId": mutated.author_runtime_id,
+        "title": mutated.title,
+        "body": mutated.body,
+        "tags": mutated.tags,
+    }))
+}
+
+fn fire_remote_weapon(
+    stream: &mut TcpStream,
+    cache: &mut CultCache,
+    document_registry: &CultNetDocumentRegistry,
+    runtime_id: &str,
+    remote_runtime_id: &str,
+) -> Result<serde_json::Value> {
+    let command = CultNetInteropFireCommand {
+        schema_version: FIRE_COMMAND_SCHEMA_VERSION.to_string(),
+        command_id: format!("{runtime_id}-fire"),
+        character_id: remote_runtime_id.to_string(),
+        weapon_id: "interop-rifle".to_string(),
+    };
+    let message = document_registry.create_raw_document_put_message(
+        format!("{runtime_id}-fire-put"),
+        command.command_id.clone(),
+        &command,
+        CultNetDocumentPutOptions::default(),
+    )?;
+    send_message(stream, &message)?;
+    let receipt_message = read_message(stream)?;
+    let receipt = document_registry
+        .apply_raw_document_put_message::<CultNetInteropFireReceipt>(cache, &receipt_message)?;
+    Ok(serde_json::json!({
+        "schemaVersion": receipt.schema_version,
+        "commandId": receipt.command_id,
+        "accepted": receipt.accepted,
+        "characterId": receipt.character_id,
+        "weaponId": receipt.weapon_id,
+        "shotsFired": receipt.shots_fired,
+        "ammoRemaining": receipt.ammo_remaining,
+    }))
 }
 
 fn start_udp_discovery_server(config: Arc<PeerConfig>) -> Result<()> {
@@ -414,8 +576,11 @@ fn start_tcp_server(
             let document_registry = document_registry.clone();
             let schema_registry = schema_registry.clone();
             thread::spawn(move || {
-                let _ =
-                    handle_connection(stream, config, cache, document_registry, schema_registry);
+                if let Err(error) =
+                    handle_connection(stream, config, cache, document_registry, schema_registry)
+                {
+                    eprintln!("{error:#}");
+                }
             });
         }
     });
@@ -448,7 +613,7 @@ fn handle_connection(
                         role: None,
                         display_name: Some(config.display_name.clone()),
                         supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
-                        supported_mutation_contracts: None,
+                        supported_mutation_contracts: Some(interaction_contracts()),
                         supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
                         supports_schema_catalog: Some(true),
                     },
@@ -480,10 +645,78 @@ fn handle_connection(
                 }
                 send_message(&mut stream, &response)?;
             }
+            message @ CultNetMessage::DocumentPutRaw { .. } => {
+                handle_raw_put(&mut stream, &config, &cache, &document_registry, &message)?;
+            }
             _ => {}
         }
     }
 
+    Ok(())
+}
+
+fn handle_raw_put(
+    stream: &mut TcpStream,
+    config: &PeerConfig,
+    cache: &Arc<Mutex<CultCache>>,
+    document_registry: &CultNetDocumentRegistry,
+    message: &CultNetMessage,
+) -> Result<()> {
+    let CultNetMessage::DocumentPutRaw { document, .. } = message else {
+        return Ok(());
+    };
+    if document.schema_id == MUTATION_INTENT_SCHEMA_ID {
+        let mut cache = cache.lock().expect("cache poisoned");
+        let intent = document_registry
+            .apply_raw_document_put_message::<CultNetInteropMutationIntent>(&mut cache, message)?;
+        let mut note = cache.get_required::<CultNetInteropNote>(&intent.target_document_id)?;
+        note.body = format!("{}{}", note.body, intent.append_body);
+        note.tags.push(intent.append_tag);
+        cache.put(&note.document_id, &note)?;
+        let receipt = CultNetInteropMutationReceipt {
+            schema_version: MUTATION_RECEIPT_SCHEMA_VERSION.to_string(),
+            intent_id: intent.intent_id.clone(),
+            accepted: true,
+            document_id: note.document_id.clone(),
+            body: note.body.clone(),
+            tags: note.tags.clone(),
+        };
+        let options = response_options(config, "mutation");
+        let receipt_message = document_registry.create_raw_document_put_message(
+            format!("{}-mutation-receipt", config.runtime_id),
+            receipt.intent_id.clone(),
+            &receipt,
+            options.clone(),
+        )?;
+        let note_message = document_registry.create_raw_document_put_message(
+            format!("{}-mutated-note", config.runtime_id),
+            note.document_id.clone(),
+            &note,
+            options,
+        )?;
+        send_message(stream, &receipt_message)?;
+        send_message(stream, &note_message)?;
+    } else if document.schema_id == FIRE_COMMAND_SCHEMA_ID {
+        let mut cache = cache.lock().expect("cache poisoned");
+        let command = document_registry
+            .apply_raw_document_put_message::<CultNetInteropFireCommand>(&mut cache, message)?;
+        let receipt = CultNetInteropFireReceipt {
+            schema_version: FIRE_RECEIPT_SCHEMA_VERSION.to_string(),
+            command_id: command.command_id,
+            accepted: true,
+            character_id: command.character_id,
+            weapon_id: command.weapon_id,
+            shots_fired: 1,
+            ammo_remaining: 29,
+        };
+        let receipt_message = document_registry.create_raw_document_put_message(
+            format!("{}-fire-receipt", config.runtime_id),
+            receipt.command_id.clone(),
+            &receipt,
+            response_options(config, "side-effect"),
+        )?;
+        send_message(stream, &receipt_message)?;
+    }
     Ok(())
 }
 
@@ -511,6 +744,91 @@ fn load_schema_registration(schema_path: &str) -> Result<CultNetSchemaRegistrati
         title,
         schema_json: Some(schema_json),
     })
+}
+
+fn register_capability_entry_types(cache: &mut CultCache) -> Result<()> {
+    cache.register_entry_type::<CultNetInteropMutationIntent>()?;
+    cache.register_entry_type::<CultNetInteropMutationReceipt>()?;
+    cache.register_entry_type::<CultNetInteropFireCommand>()?;
+    cache.register_entry_type::<CultNetInteropFireReceipt>()?;
+    Ok(())
+}
+
+fn register_capability_bindings(
+    document_registry: &mut CultNetDocumentRegistry,
+    note_schema_id: &str,
+) {
+    document_registry
+        .register(CultNetDocumentBinding::for_entry_with_schema_id::<
+            CultNetInteropNote,
+        >(
+            note_schema_id.to_string(),
+            INTEROP_SCHEMA_VERSION.to_string(),
+        ))
+        .register(CultNetDocumentBinding::for_entry_with_schema_id::<
+            CultNetInteropMutationIntent,
+        >(
+            MUTATION_INTENT_SCHEMA_ID.to_string(),
+            MUTATION_INTENT_SCHEMA_VERSION.to_string(),
+        ))
+        .register(CultNetDocumentBinding::for_entry_with_schema_id::<
+            CultNetInteropMutationReceipt,
+        >(
+            MUTATION_RECEIPT_SCHEMA_ID.to_string(),
+            MUTATION_RECEIPT_SCHEMA_VERSION.to_string(),
+        ))
+        .register(CultNetDocumentBinding::for_entry_with_schema_id::<
+            CultNetInteropFireCommand,
+        >(
+            FIRE_COMMAND_SCHEMA_ID.to_string(),
+            FIRE_COMMAND_SCHEMA_VERSION.to_string(),
+        ))
+        .register(CultNetDocumentBinding::for_entry_with_schema_id::<
+            CultNetInteropFireReceipt,
+        >(
+            FIRE_RECEIPT_SCHEMA_ID.to_string(),
+            FIRE_RECEIPT_SCHEMA_VERSION.to_string(),
+        ));
+}
+
+fn interaction_contracts() -> Vec<CultNetDocumentMutationContract> {
+    vec![CultNetDocumentMutationContract {
+        document_type: INTEROP_DOCUMENT_TYPE.to_string(),
+        payload_schema_version: Some(INTEROP_SCHEMA_VERSION.to_string()),
+        operations: vec![
+            CultNetDocumentOperation::Snapshot,
+            CultNetDocumentOperation::DocumentPut,
+            CultNetDocumentOperation::IntentSubmit,
+            CultNetDocumentOperation::ReceiptWatch,
+        ],
+        authority: CultNetMutationAuthority::Runtime,
+        intent_document_types: Some(vec![
+            MUTATION_INTENT_TYPE.to_string(),
+            FIRE_COMMAND_TYPE.to_string(),
+        ]),
+        receipt_document_types: Some(vec![
+            MUTATION_RECEIPT_TYPE.to_string(),
+            FIRE_RECEIPT_TYPE.to_string(),
+        ]),
+        notes: None,
+    }]
+}
+
+fn response_options(config: &PeerConfig, tag: &str) -> CultNetDocumentPutOptions {
+    CultNetDocumentPutOptions {
+        source_runtime_id: Some(config.runtime_id.clone()),
+        source_agent_id: Some(config.agent_id.clone()),
+        source_role: Some("peer".to_string()),
+        tags: Some(vec![tag.to_string(), config.runtime_id.clone()]),
+        ..CultNetDocumentPutOptions::default()
+    }
+}
+
+fn mutated_message_schema_id(message: &CultNetMessage) -> Option<&str> {
+    match message {
+        CultNetMessage::DocumentPutRaw { document, .. } => Some(document.schema_id.as_str()),
+        _ => None,
+    }
 }
 
 fn build_note(runtime_id: &str, display_name: &str) -> CultNetInteropNote {

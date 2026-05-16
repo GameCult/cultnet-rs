@@ -146,6 +146,33 @@ impl CultNetDocumentRegistry {
         })
     }
 
+    pub fn create_raw_document_put_message<T>(
+        &self,
+        message_id: impl Into<String>,
+        record_key: impl Into<String>,
+        value: &T,
+        options: CultNetDocumentPutOptions,
+    ) -> Result<CultNetMessage>
+    where
+        T: DatabaseEntry + Serialize,
+    {
+        let binding = self.require_binding(T::TYPE)?;
+        Ok(CultNetMessage::DocumentPutRaw {
+            message_id: message_id.into(),
+            document: CultNetRawDocumentRecord {
+                schema_id: binding.schema_id.clone(),
+                record_key: record_key.into(),
+                stored_at: options.stored_at.unwrap_or_else(now_utc_second),
+                payload_encoding: CultNetRawPayloadEncoding::Messagepack,
+                payload: rmp_serde::to_vec(value)?,
+                source_runtime_id: options.source_runtime_id,
+                source_agent_id: options.source_agent_id,
+                source_role: options.source_role,
+                tags: options.tags,
+            },
+        })
+    }
+
     pub fn create_snapshot_response(
         &self,
         cache: &CultCache,
