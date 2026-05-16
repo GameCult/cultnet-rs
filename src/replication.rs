@@ -320,6 +320,7 @@ impl CultNetDocumentRegistry {
             r#type: binding.document_type.clone(),
             payload: document.payload.clone(),
             stored_at: document.stored_at.clone(),
+            schema_id: Some(binding.schema_id.clone()),
         })
     }
 
