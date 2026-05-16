@@ -30,14 +30,28 @@ pub struct CultNetDocumentBinding {
     pub schema_id: String,
     pub document_type: String,
     pub mutation_contract: Option<CultNetDocumentMutationContract>,
+    pub payload_schema_version: Option<String>,
 }
 
 impl CultNetDocumentBinding {
-    pub fn for_entry<T: DatabaseEntry>(schema_id: impl Into<String>) -> Self {
+    pub fn for_entry<T: DatabaseEntry>(payload_schema_version: impl Into<Option<String>>) -> Self {
         Self {
-            schema_id: schema_id.into(),
             document_type: T::TYPE.to_string(),
+            schema_id: T::TYPE.to_string(),
             mutation_contract: None,
+            payload_schema_version: payload_schema_version.into(),
+        }
+    }
+
+    pub fn for_entry_with_schema_id<T: DatabaseEntry>(
+        schema_id: impl Into<String>,
+        payload_schema_version: impl Into<Option<String>>,
+    ) -> Self {
+        Self {
+            document_type: T::TYPE.to_string(),
+            schema_id: schema_id.into(),
+            mutation_contract: None,
+            payload_schema_version: payload_schema_version.into(),
         }
     }
 
@@ -140,8 +154,7 @@ impl CultNetDocumentRegistry {
         record_keys: Option<&[String]>,
     ) -> Result<CultNetMessage> {
         let requested_schema_ids = schema_ids.map(|items| items.iter().collect::<BTreeSet<_>>());
-        let requested_record_keys =
-            record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
+        let requested_record_keys = record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
         let mut documents = Vec::new();
         for envelope in cache.snapshot() {
             let binding = self.require_binding(&envelope.r#type)?;
@@ -173,8 +186,7 @@ impl CultNetDocumentRegistry {
         record_keys: Option<&[String]>,
     ) -> Result<CultNetMessage> {
         let requested_schema_ids = schema_ids.map(|items| items.iter().collect::<BTreeSet<_>>());
-        let requested_record_keys =
-            record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
+        let requested_record_keys = record_keys.map(|items| items.iter().collect::<BTreeSet<_>>());
         let mut documents = Vec::new();
         for envelope in cache.snapshot() {
             let binding = self.require_binding(&envelope.r#type)?;
@@ -278,7 +290,7 @@ impl CultNetDocumentRegistry {
         }
         cache.put_envelope::<T>(CultCacheEnvelope {
             key: document.record_key.clone(),
-            r#type: T::TYPE.to_string(),
+            r#type: binding.document_type.clone(),
             payload: document.payload.clone(),
             stored_at: document.stored_at.clone(),
         })

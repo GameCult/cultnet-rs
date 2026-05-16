@@ -125,7 +125,7 @@ fn main() -> Result<()> {
 fn serve(config: PeerConfig) -> Result<()> {
     let schema_registration = load_schema_registration(&config.schema_path)?;
     let mut schema_registry = builtin_schema_registry()?;
-    schema_registry.register(schema_registration)?;
+    schema_registry.register(schema_registration.clone())?;
 
     let mut cache = CultCache::new();
     cache.register_entry_type::<CultNetInteropNote>()?;
@@ -137,7 +137,10 @@ fn serve(config: PeerConfig) -> Result<()> {
     cache.put(&note.document_id, &note)?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(
+    document_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        CultNetInteropNote,
+    >(
+        schema_registration.schema_id.clone(),
         INTEROP_SCHEMA_VERSION.to_string(),
     ));
 
@@ -251,7 +254,10 @@ fn dial(config: DialConfig) -> Result<()> {
     cache.pull_all_backing_stores()?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    document_registry.register(CultNetDocumentBinding::for_entry::<CultNetInteropNote>(
+    document_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+        CultNetInteropNote,
+    >(
+        schema_registration.schema_id.clone(),
         INTEROP_SCHEMA_VERSION.to_string(),
     ));
 
