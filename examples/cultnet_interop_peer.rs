@@ -958,7 +958,7 @@ fn parse_ipv4_arg(options: &BTreeMap<String, String>, name: &str) -> Result<Ipv4
 }
 
 fn runtime_store_path(runtime_id: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("cultnet-rs-interop-{runtime_id}.msgpack"))
+    std::env::temp_dir().join(format!("cultnet-rs-interop-{runtime_id}.cc"))
 }
 
 fn print_json(value: &serde_json::Value) -> Result<()> {

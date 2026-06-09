@@ -200,8 +200,8 @@ fn document_registry_advertises_mutation_contracts_with_bindings() -> Result<()>
 #[test]
 fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let origin_store = temp.path().join("origin.msgpack");
-    let target_store = temp.path().join("target.msgpack");
+    let origin_store = temp.path().join("origin.cc");
+    let target_store = temp.path().join("target.cc");
     let payload = GhostlightAgentStateFixture {
         schema_version: "ghostlight.agent_state.v0".to_string(),
         agent_id: "epiphany.face".to_string(),
@@ -251,8 +251,8 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
 #[test]
 fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let origin_store = temp.path().join("origin-raw.msgpack");
-    let target_store = temp.path().join("target-raw.msgpack");
+    let origin_store = temp.path().join("origin-raw.cc");
+    let target_store = temp.path().join("target-raw.cc");
     let payload = GhostlightAgentStateFixture {
         schema_version: "ghostlight.agent_state.v0".to_string(),
         agent_id: "epiphany.face".to_string(),
