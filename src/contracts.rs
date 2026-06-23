@@ -81,6 +81,72 @@ pub struct CultNetDocumentMutationContract {
     pub notes: Option<Vec<String>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetTransportProfile {
+    pub schema_version: String,
+    pub runtime_id: String,
+    pub transports: Vec<CultNetTransportDescriptor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetTransportDescriptor {
+    pub transport_id: String,
+    pub protocol: CultNetTransportProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_contracts: Option<Vec<String>>,
+    pub channels: Vec<CultNetTransportChannel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CultNetTransportProtocol {
+    TcpFramed,
+    Litenetlib,
+    Websocket,
+    Rudp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetTransportChannel {
+    pub channel_id: String,
+    pub delivery: CultNetTransportDelivery,
+    pub ordering: CultNetTransportOrdering,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_payload_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fragment_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_reliable_packets: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliable_expire_after_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CultNetTransportDelivery {
+    Reliable,
+    Unreliable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CultNetTransportOrdering {
+    Ordered,
+    Unordered,
+    Sequenced,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CultNetRawDocumentRecord {
@@ -136,6 +202,8 @@ pub enum CultNetMessage {
         supported_mutation_contracts: Option<Vec<CultNetDocumentMutationContract>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supported_message_versions: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport_profiles: Option<Vec<CultNetTransportProfile>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supports_schema_catalog: Option<bool>,
     },
@@ -287,6 +355,7 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             supported_document_types,
             supported_mutation_contracts,
             supported_message_versions,
+            transport_profiles: _,
             supports_schema_catalog: _,
         } => {
             require_non_empty(runtime_id, "runtimeId")?;
