@@ -208,6 +208,13 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             None,
         )?,
         schema_registration(
+            include_str!("../contracts/cultnet.transport-profile.schema.json"),
+            CultNetSchemaKind::SharedContract,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("cultnet.transport_profile.v0"),
+            None,
+        )?,
+        schema_registration(
             include_str!("../contracts/cultnet.login.schema.json"),
             CultNetSchemaKind::WireMessage,
             vec![

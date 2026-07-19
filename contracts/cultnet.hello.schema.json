@@ -30,6 +30,12 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     },
+    "transportProfiles": {
+      "type": "array",
+      "items": {
+        "$ref": "./cultnet.transport-profile.schema.json"
+      }
+    },
     "supportsSchemaCatalog": { "type": "boolean" }
   }
 }

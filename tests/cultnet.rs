@@ -89,6 +89,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
             ]),
         }]),
         supported_message_versions: None,
+        transport_profiles: None,
         supports_schema_catalog: Some(true),
     };
     let payload = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
@@ -146,6 +147,7 @@ fn rust_decodes_typescript_generated_cultnet_frames() -> Result<()> {
             supported_document_types: Some(vec!["ghostlight.agent-state".to_string()]),
             supported_mutation_contracts: None,
             supported_message_versions: None,
+            transport_profiles: None,
             supports_schema_catalog: None,
         }
     );

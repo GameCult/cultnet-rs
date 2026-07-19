@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-ts/contracts/cultnet.transport-profile.schema.json",
+  "title": "CultNet Transport Profile",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runtimeId",
+    "transports"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.transport_profile.v0" },
+    "runtimeId": { "type": "string", "minLength": 1 },
+    "transports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "transportId",
+          "protocol",
+          "channels"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "transportId": { "type": "string", "minLength": 1 },
+          "protocol": {
+            "type": "string",
+            "enum": [
+              "tcp_framed",
+              "litenetlib",
+              "websocket",
+              "rudp"
+            ]
+          },
+          "host": { "type": "string", "minLength": 1 },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "path": { "type": "string", "minLength": 1 },
+          "discoveryGroup": { "type": "string", "minLength": 1 },
+          "wireContracts": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "channelId",
+                "delivery",
+                "ordering"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "channelId": { "type": "string", "minLength": 1 },
+                "delivery": {
+                  "type": "string",
+                  "enum": [
+                    "reliable",
+                    "unreliable"
+                  ]
+                },
+                "ordering": {
+                  "type": "string",
+                  "enum": [
+                    "ordered",
+                    "unordered",
+                    "sequenced"
+                  ]
+                },
+                "maxPayloadBytes": { "type": "integer", "minimum": 1 },
+                "maxFragmentBytes": { "type": "integer", "minimum": 1 },
+                "maxPendingReliablePackets": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+

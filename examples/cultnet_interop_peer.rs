@@ -366,6 +366,7 @@ fn dial(config: DialConfig) -> Result<()> {
             supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
             supported_mutation_contracts: Some(interaction_contracts()),
             supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+            transport_profiles: None,
             supports_schema_catalog: Some(true),
         },
     )?;
@@ -617,6 +618,7 @@ fn handle_connection(
                         supported_document_types: Some(vec![INTEROP_DOCUMENT_TYPE.to_string()]),
                         supported_mutation_contracts: Some(interaction_contracts()),
                         supported_message_versions: Some(vec![INTEROP_SCHEMA_VERSION.to_string()]),
+                        transport_profiles: None,
                         supports_schema_catalog: Some(true),
                     },
                 )?;
