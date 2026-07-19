@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/idunn.deployment-brake.schema.json",
+  "title": "Idunn deployment brake",
+  "description": "CultCache-compatible canonical brake projection with one bounded deployment release authorization.",
+  "type": "array",
+  "prefixItems": [
+    { "const": "idunn.deployment_brake.v1" },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "enum": ["engaged", "released"] },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "integer", "minimum": 1 },
+    { "type": ["integer", "null"], "minimum": 1 },
+    { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+    { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+    { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+    { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+    { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+    { "type": ["integer", "null"], "minimum": 1 },
+    { "type": ["integer", "null"], "minimum": 1 },
+    { "type": ["string", "null"] },
+    { "type": ["array", "null"], "items": { "type": "integer", "minimum": 0, "maximum": 255 }, "minItems": 64, "maxItems": 64 },
+    { "const": false }
+  ],
+  "minItems": 19,
+  "maxItems": 19
+}

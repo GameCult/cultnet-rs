@@ -53,12 +53,19 @@ surface:
 - legacy `gamecult.networking.v0` auth/sample payloads
 - schema catalog request/response messages
 - the canonical `ghostlight.agent-state` document payload schema
+- the Idunn-owned `idunn.deployment_brake.v1` document payload schema
 
 Use `builtin_schema_registry()` when you want the standard catalog, or register
 your own closed-world schema set with `CultNetSchemaRegistry`. Discovery stays
 explicit on purpose: peers advertise only the contracts they were compiled to
 understand, the same way CultCache only consumes the document types you
 registered instead of pretending polymorphism is a public park.
+
+Idunn evaluates its deployment brake fail-closed: absence, corruption, foreign
+authority, wrong runtime or scope, engagement, and expiry all refuse actuation.
+A released record permits only its named release and deployment attempt during
+a signed authorization interval of at most fifteen minutes. Release status by
+itself is not deployment authority.
 
 ## Local Fast Lane
 

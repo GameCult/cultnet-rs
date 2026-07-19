@@ -33,6 +33,31 @@ pub trait ServiceSignaturePurpose<P: ServiceIdentityProfile>: Send + Sync + 'sta
 
 pub enum IdunnServiceIdentity {}
 
+/// Root-operated identity dedicated to deployment-brake release grants. The
+/// Idunn daemon receives only this profile's public trust anchor; opening the
+/// private store is a provisioning operation, never daemon startup work.
+pub enum IdunnDeploymentBrakeOperatorIdentity {}
+
+pub struct IdunnDeploymentBrakeReleasePurpose;
+
+impl ServiceSignaturePurpose<IdunnDeploymentBrakeOperatorIdentity>
+    for IdunnDeploymentBrakeReleasePurpose
+{
+    const PURPOSE: &'static [u8] = b"idunn.deployment-release.v1";
+}
+
+impl ServiceIdentityProfile for IdunnDeploymentBrakeOperatorIdentity {
+    const PRIVATE_TYPE: &'static str = "idunn.deployment_brake_operator.private.v1";
+    const PRIVATE_SCHEMA: &'static str = "idunn.deployment_brake_operator.private.v1";
+    const PRIVATE_KEY: &'static str = "idunn-deployment-brake-operator";
+    const TRUST_ANCHOR_TYPE: &'static str = "idunn.deployment_brake_operator.trust_anchor.v1";
+    const TRUST_ANCHOR_SCHEMA: &'static str = "idunn.deployment_brake_operator.trust_anchor.v1";
+    const TRUST_ANCHOR_KEY: &'static str = "idunn-deployment-brake-operator-public";
+    const ID_DOMAIN: &'static [u8] = b"idunn.deployment-brake-operator.id.v1\0";
+    const SIGNATURE_DOMAIN: &'static [u8] = b"idunn.deployment-brake-operator.signature.v1\0";
+    const PROTECTOR_CONTEXT: &'static str = "idunn-deployment-brake-operator-v1";
+}
+
 /// Dedicated provider-owned identity for generic daemon-health statements.
 /// It is intentionally independent of any one provider runtime or repository.
 pub enum GameCultProviderHealthIdentity {}

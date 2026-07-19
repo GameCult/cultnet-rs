@@ -360,6 +360,13 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             Some("ghostlight.agent_state.v0"),
             Some("ghostlight.agent-state"),
         )?,
+        schema_registration(
+            include_str!("../contracts/idunn.deployment-brake.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("idunn.deployment_brake.v1"),
+            Some("idunn.deployment_brake"),
+        )?,
     ] {
         registry.register(registration)?;
     }
