@@ -274,6 +274,31 @@ where
         .map_err(|_| anyhow!("service identity signature verification failed"))
 }
 
+/// Verify against a public key already admitted by an owning trust store.
+/// The profile derives the identity, so callers cannot substitute a convenient
+/// identity string while retaining the same signature bytes.
+pub fn verify_service_identity_signature_with_public_key<P, S>(
+    public_key: &[u8],
+    payload: &[u8],
+    proof: &ServiceIdentitySignature,
+) -> Result<()>
+where
+    P: ServiceIdentityProfile,
+    S: ServiceSignaturePurpose<P>,
+{
+    if proof.identity_id != derive_service_identity_id::<P>(public_key)? {
+        bail!("service identity signature names a different identity");
+    }
+    let key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| anyhow!("service identity public key has invalid length"))?;
+    let signature = Signature::from_slice(&proof.signature)
+        .map_err(|_| anyhow!("service identity signature has invalid length"))?;
+    VerifyingKey::from_bytes(&key)?
+        .verify(&signing_message::<P, S>(payload), &signature)
+        .map_err(|_| anyhow!("service identity signature verification failed"))
+}
+
 fn validate_private<P: ServiceIdentityProfile>(entry: &ServiceIdentityPrivateEntry) -> Result<()> {
     if entry.schema_version != P::PRIVATE_SCHEMA
         || entry.public_key.len() != 32
@@ -638,6 +663,10 @@ mod tests {
             GameCultProviderHealthIdentity,
             IdunnSignedDaemonHealthPurpose,
         >(&anchor, b"signed-health-record", &proof)?;
+        verify_service_identity_signature_with_public_key::<
+            GameCultProviderHealthIdentity,
+            IdunnSignedDaemonHealthPurpose,
+        >(&anchor.public_key, b"signed-health-record", &proof)?;
         assert_eq!(
             anchor.schema_version,
             "gamecult.provider_health_identity.trust_anchor.v1"
