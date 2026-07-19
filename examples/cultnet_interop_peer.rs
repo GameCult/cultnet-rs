@@ -11,6 +11,7 @@ use cultnet_rs::CultNetDocumentPutOptions;
 use cultnet_rs::CultNetDocumentRegistry;
 use cultnet_rs::CultNetMessage;
 use cultnet_rs::CultNetMutationAuthority;
+use cultnet_rs::CultNetReadOnlySnapshotPolicy;
 use cultnet_rs::CultNetSchemaKind;
 use cultnet_rs::CultNetSchemaRegistration;
 use cultnet_rs::CultNetSchemaRegistry;
@@ -19,6 +20,7 @@ use cultnet_rs::builtin_schema_registry;
 use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_to_vec;
 use cultnet_rs::encode_frame;
+use cultnet_rs::serve_read_only_raw_snapshot;
 use serde::Deserialize;
 use serde::Serialize;
 use socket2::Domain;
@@ -623,26 +625,28 @@ fn handle_connection(
                 let response = schema_registry.create_catalog_response(&request)?;
                 send_message(&mut stream, &response)?;
             }
-            CultNetMessage::SnapshotRequest {
-                message_id,
-                schema_ids,
-                record_keys,
-            } => {
-                let mut response = document_registry.create_raw_snapshot_response(
-                    &cache.lock().expect("cache poisoned"),
-                    message_id,
-                    schema_ids.as_deref(),
-                    record_keys.as_deref(),
-                )?;
-                if let CultNetMessage::SnapshotResponseRaw { documents, .. } = &mut response {
-                    for document in documents.iter_mut() {
-                        document.source_runtime_id = Some(config.runtime_id.clone());
-                        document.source_agent_id = Some(config.agent_id.clone());
-                        document.source_role = Some("peer".to_string());
-                        document.tags =
-                            Some(vec!["interop".to_string(), config.runtime_id.clone()]);
+            request @ CultNetMessage::SnapshotRequest { .. } => {
+                // Snapshot serving is a pure read. The backing projection owns
+                // the records and provenance; the protocol loop only filters
+                // an explicit allowlist and returns their exact payload bytes.
+                let (source, policy) = {
+                    let cache = cache.lock().expect("cache poisoned");
+                    let mut records = Vec::new();
+                    let mut policy = CultNetReadOnlySnapshotPolicy::new();
+                    for envelope in cache.snapshot() {
+                        let mut record =
+                            document_registry.raw_document_record_from_envelope(&envelope)?;
+                        record.source_runtime_id = Some(config.runtime_id.clone());
+                        record.source_agent_id = Some(config.agent_id.clone());
+                        record.source_role = Some("peer".to_string());
+                        record.tags = Some(vec!["interop".to_string(), config.runtime_id.clone()]);
+                        policy.allow(&record.schema_id, &record.record_key)?;
+                        records.push(record);
                     }
-                }
+                    (records, policy)
+                };
+                let response =
+                    serve_read_only_raw_snapshot(&document_registry, &policy, &source, &request)?;
                 send_message(&mut stream, &response)?;
             }
             message @ CultNetMessage::DocumentPutRaw { .. } => {
@@ -958,7 +962,7 @@ fn parse_ipv4_arg(options: &BTreeMap<String, String>, name: &str) -> Result<Ipv4
 }
 
 fn runtime_store_path(runtime_id: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("cultnet-rs-interop-{runtime_id}.msgpack"))
+    std::env::temp_dir().join(format!("cultnet-rs-interop-{runtime_id}.cc"))
 }
 
 fn print_json(value: &serde_json::Value) -> Result<()> {

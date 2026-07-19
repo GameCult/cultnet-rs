@@ -403,7 +403,9 @@ impl CultNetDocumentRegistry {
         })
     }
 
-    fn raw_document_record_from_envelope(
+    /// Project a stored CultCache envelope as a raw CultNet record without
+    /// decoding or re-encoding its payload bytes.
+    pub fn raw_document_record_from_envelope(
         &self,
         envelope: &CultCacheEnvelope,
     ) -> Result<CultNetRawDocumentRecord> {

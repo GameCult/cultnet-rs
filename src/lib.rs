@@ -1,11 +1,17 @@
 mod contracts;
 mod framing;
+mod provider_health_contracts;
 mod replication;
 mod schema_discovery;
 mod security;
+mod service_identity;
+mod snapshot_query;
 
 pub use contracts::*;
 pub use framing::*;
+pub use provider_health_contracts::*;
 pub use replication::*;
 pub use schema_discovery::*;
 pub use security::*;
+pub use service_identity::*;
+pub use snapshot_query::*;
