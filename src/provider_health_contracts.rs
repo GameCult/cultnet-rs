@@ -6,12 +6,91 @@ use crate::{IdunnServiceIdentity, derive_service_identity_id};
 pub const GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA: &str = "gamecult.service_trust_anchor.v1";
 pub const IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA: &str =
     "idunn.authenticated_provider_health_projection.v1";
+pub const IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA: &str = "idunn.signed_daemon_health.v1";
 pub const IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SIGNING_PURPOSE: &str =
     "idunn.authenticated-provider-health-projection.v1";
 pub const IDUNN_PROVIDER_ACTIVE_REASON: &str = "authenticated_provider_active";
 pub const IDUNN_PROVIDER_WARMING_REASON: &str = "authenticated_provider_warming";
 pub const IDUNN_PROVIDER_DEGRADED_REASON: &str = "authenticated_provider_degraded";
 pub const IDUNN_PROVIDER_FAILED_REASON: &str = "authenticated_provider_failed";
+
+/// Provider-owned health statement. Ingress verifies `signature` over the
+/// complete positional record with this field empty before admitting it.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "idunn.signed_daemon_health",
+    schema = "idunn.signed_daemon_health.v1"
+)]
+pub struct IdunnSignedDaemonHealthRecord {
+    #[cultcache(key = 0)]
+    pub schema_version: String,
+    #[cultcache(key = 1)]
+    pub daemon_id: String,
+    #[cultcache(key = 2)]
+    pub health_contract: String,
+    #[cultcache(key = 3)]
+    pub source_runtime_id: String,
+    #[cultcache(key = 4)]
+    pub state: String,
+    #[cultcache(key = 5)]
+    pub detail: String,
+    #[cultcache(key = 6)]
+    pub signer_identity_id: String,
+    #[cultcache(key = 7)]
+    pub publisher_incarnation_id: String,
+    #[cultcache(key = 8)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 9)]
+    pub observed_at_unix_millis: u64,
+    #[cultcache(key = 10)]
+    pub release_id: Option<String>,
+    #[cultcache(key = 11)]
+    pub release_witness_sha256: Option<String>,
+    #[cultcache(key = 12)]
+    pub source_commit: Option<String>,
+    #[cultcache(key = 13)]
+    pub deployment_id: Option<String>,
+    #[cultcache(key = 14)]
+    pub signature_algorithm: String,
+    #[cultcache(key = 15)]
+    pub signature: Vec<u8>,
+    #[cultcache(key = 16)]
+    pub private_state_exposed: bool,
+}
+
+impl IdunnSignedDaemonHealthRecord {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA {
+            bail!("signed daemon health schema is unsupported");
+        }
+        validate_identifier(&self.daemon_id, "daemon id")?;
+        validate_identifier(&self.health_contract, "health contract")?;
+        validate_identifier(&self.source_runtime_id, "source runtime id")?;
+        validate_identifier(&self.signer_identity_id, "signer identity id")?;
+        validate_identifier(&self.publisher_incarnation_id, "publisher incarnation id")?;
+        if !matches!(
+            self.state.as_str(),
+            "active" | "warming" | "degraded" | "failed"
+        ) || self.detail.len() > 512
+            || self.signature_algorithm != "ed25519"
+            || self.signature.len() != 64
+            || self.publisher_sequence == 0
+            || self.observed_at_unix_millis == 0
+        {
+            bail!("signed daemon health shape is invalid");
+        }
+        validate_optional_release_binding(
+            &self.release_id,
+            &self.release_witness_sha256,
+            &self.source_commit,
+        )?;
+        validate_optional_identifier(&self.deployment_id, "deployment id")?;
+        if self.private_state_exposed {
+            bail!("signed daemon health exposes private state");
+        }
+        Ok(())
+    }
+}
 
 /// Root-distributed public key binding for one service-owned signed contract.
 /// Consumers pin this document; a self-declared key inside a signed projection
@@ -265,6 +344,28 @@ fn is_lower_hex(value: &str, length: usize) -> bool {
 mod tests {
     use super::*;
 
+    fn signed_health() -> IdunnSignedDaemonHealthRecord {
+        IdunnSignedDaemonHealthRecord {
+            schema_version: IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into(),
+            daemon_id: "epiphany".into(),
+            health_contract: "epiphany.cultnet-rudp-runtime-health".into(),
+            source_runtime_id: "epiphany-yggdrasil".into(),
+            state: "active".into(),
+            detail: "managed-services-current".into(),
+            signer_identity_id: "provider-signing-key".into(),
+            publisher_incarnation_id: "9c2cba2e-c2de-4750-b222-b732f97d0435".into(),
+            publisher_sequence: 1,
+            observed_at_unix_millis: 100,
+            release_id: Some("release-1".into()),
+            release_witness_sha256: Some(format!("sha256-{}", "d".repeat(64))),
+            source_commit: Some("e".repeat(40)),
+            deployment_id: Some("deployment-1".into()),
+            signature_algorithm: "ed25519".into(),
+            signature: vec![6; 64],
+            private_state_exposed: false,
+        }
+    }
+
     fn anchor() -> GameCultServiceTrustAnchorRecord {
         let public_key = vec![5; 32];
         GameCultServiceTrustAnchorRecord {
@@ -322,8 +423,17 @@ mod tests {
     fn contracts_accept_exact_root_and_lineage_shapes() -> Result<()> {
         let anchor = anchor();
         let projection = projection();
+        let health = signed_health();
         anchor.validate()?;
         projection.validate()?;
+        health.validate()?;
+        let encoded = rmp_serde::to_vec(&health)?;
+        assert_eq!(encoded.first().copied(), Some(0xdc));
+        assert_eq!(&encoded[1..3], &[0, 17]);
+        assert_eq!(
+            rmp_serde::from_slice::<IdunnSignedDaemonHealthRecord>(&encoded)?,
+            health
+        );
         assert_eq!(
             rmp_serde::from_slice::<GameCultServiceTrustAnchorRecord>(&rmp_serde::to_vec(
                 &anchor
@@ -362,6 +472,15 @@ mod tests {
         assert!(value.validate().is_err());
         let mut value = projection();
         value.signed_health_sha256 = format!("sha256-{}", "A".repeat(64));
+        assert!(value.validate().is_err());
+        let mut value = signed_health();
+        value.publisher_sequence = 0;
+        assert!(value.validate().is_err());
+        let mut value = signed_health();
+        value.release_witness_sha256 = None;
+        assert!(value.validate().is_err());
+        let mut value = signed_health();
+        value.private_state_exposed = true;
         assert!(value.validate().is_err());
     }
 }
