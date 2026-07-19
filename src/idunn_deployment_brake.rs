@@ -58,6 +58,10 @@ pub struct IdunnDeploymentBrakeRecord {
     pub signature: Option<Vec<u8>>,
     #[cultcache(key = 18)]
     pub private_state_exposed: bool,
+    /// Human/operator principal responsible for the latest transition. This is
+    /// distinct from `authorized_by`, which is the cryptographic identity id.
+    #[cultcache(key = 19)]
+    pub updated_by: String,
 }
 
 impl IdunnDeploymentBrakeRecord {
@@ -70,6 +74,7 @@ impl IdunnDeploymentBrakeRecord {
         identifier(&self.runtime_id, "runtime id")?;
         identifier(&self.reason, "reason")?;
         identifier(&self.scope, "scope")?;
+        identifier(&self.updated_by, "updating operator")?;
         if !matches!(self.status.as_str(), "engaged" | "released")
             || self.observed_at_unix_millis == 0
             || self
@@ -295,6 +300,7 @@ mod tests {
             signature_algorithm: Some("ed25519".into()),
             signature: Some(vec![7; 64]),
             private_state_exposed: false,
+            updated_by: "operator/metacrat".into(),
         }
     }
 
