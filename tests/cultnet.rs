@@ -84,7 +84,7 @@ fn cultnet_schema_messages_round_trip_through_messagepack_frames() -> Result<()>
             intent_document_types: Some(vec!["ghostlight.agent-state.intent.v0".to_string()]),
             receipt_document_types: Some(vec!["ghostlight.agent-state.receipt.v0".to_string()]),
             notes: Some(vec![
-                "Face may request bounded memory mutation; coordinator reviews authority."
+                "Persona may request bounded memory mutation; coordinator reviews authority."
                     .to_string(),
             ]),
         }]),
@@ -204,8 +204,8 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     let target_store = temp.path().join("target.msgpack");
     let payload = GhostlightAgentStateFixture {
         schema_version: "ghostlight.agent_state.v0".to_string(),
-        agent_id: "epiphany.face".to_string(),
-        display_name: "Face".to_string(),
+        agent_id: "epiphany.persona".to_string(),
+        display_name: "Persona".to_string(),
     };
 
     let mut registry = CultNetDocumentRegistry::new();
@@ -217,7 +217,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
     origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
     origin.pull_all_backing_stores()?;
-    origin.put("epiphany.face", &payload)?;
+    origin.put("epiphany.persona", &payload)?;
 
     let snapshot = registry.create_snapshot_response(&origin, "snapshot-1", None, None)?;
 
@@ -229,22 +229,22 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
         registry.apply_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &snapshot)?;
     assert_eq!(applied, vec![payload.clone()]);
     assert_eq!(
-        target.get_required::<GhostlightAgentStateFixture>("epiphany.face")?,
+        target.get_required::<GhostlightAgentStateFixture>("epiphany.persona")?,
         payload
     );
 
     let direct_put = registry.create_document_put_message(
         "put-1",
-        "epiphany.face",
+        "epiphany.persona",
         &GhostlightAgentStateFixture {
-            display_name: "Face Prime".to_string(),
+            display_name: "Persona Prime".to_string(),
             ..payload
         },
         CultNetDocumentPutOptions::default(),
     )?;
     let updated = registry
         .apply_document_put_message::<GhostlightAgentStateFixture>(&mut target, &direct_put)?;
-    assert_eq!(updated.display_name, "Face Prime");
+    assert_eq!(updated.display_name, "Persona Prime");
     Ok(())
 }
 
@@ -255,8 +255,8 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     let target_store = temp.path().join("target-raw.msgpack");
     let payload = GhostlightAgentStateFixture {
         schema_version: "ghostlight.agent_state.v0".to_string(),
-        agent_id: "epiphany.face".to_string(),
-        display_name: "Face".to_string(),
+        agent_id: "epiphany.persona".to_string(),
+        display_name: "Persona".to_string(),
     };
 
     let mut registry = CultNetDocumentRegistry::new();
@@ -268,12 +268,12 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
     origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store));
     origin.pull_all_backing_stores()?;
-    origin.put("epiphany.face", &payload)?;
+    origin.put("epiphany.persona", &payload)?;
 
     let raw_snapshot =
         registry.create_raw_snapshot_response(&origin, "raw-snapshot-1", None, None)?;
     let source_envelope =
-        origin.get_required_envelope::<GhostlightAgentStateFixture>("epiphany.face")?;
+        origin.get_required_envelope::<GhostlightAgentStateFixture>("epiphany.persona")?;
 
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateFixture>()?;
@@ -282,12 +282,12 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     let applied = registry
         .apply_raw_snapshot_response::<GhostlightAgentStateFixture>(&mut target, &raw_snapshot)?;
     let target_envelope =
-        target.get_required_envelope::<GhostlightAgentStateFixture>("epiphany.face")?;
+        target.get_required_envelope::<GhostlightAgentStateFixture>("epiphany.persona")?;
 
     assert_eq!(applied, vec![payload.clone()]);
     assert_eq!(target_envelope.payload, source_envelope.payload);
     assert_eq!(
-        target.get_required::<GhostlightAgentStateFixture>("epiphany.face")?,
+        target.get_required::<GhostlightAgentStateFixture>("epiphany.persona")?,
         payload
     );
     Ok(())
