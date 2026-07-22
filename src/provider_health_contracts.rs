@@ -52,7 +52,7 @@ pub struct IdunnSignedDaemonHealthRecord {
     pub deployment_id: Option<String>,
     #[cultcache(key = 14)]
     pub signature_algorithm: String,
-    #[cultcache(key = 15)]
+    #[cultcache(key = 15, bytes)]
     pub signature: Vec<u8>,
     #[cultcache(key = 16)]
     pub private_state_exposed: bool,
@@ -430,6 +430,12 @@ mod tests {
         let encoded = rmp_serde::to_vec(&health)?;
         assert_eq!(encoded.first().copied(), Some(0xdc));
         assert_eq!(&encoded[1..3], &[0, 17]);
+        assert!(
+            encoded
+                .windows(4)
+                .any(|window| window == [0xc4, 0x40, 6, 6]),
+            "provider signature must use the portable MessagePack binary shape"
+        );
         assert_eq!(
             rmp_serde::from_slice::<IdunnSignedDaemonHealthRecord>(&encoded)?,
             health
