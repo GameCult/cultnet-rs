@@ -158,7 +158,7 @@ pub fn enroll_service_identity_at<P: ServiceIdentityProfile>(
             path.display()
         );
     }
-    prepare_parent(path)?;
+    prepare_private_parent(path)?;
     let mut seed = [0u8; 32];
     rand::rng().fill_bytes(&mut seed);
     let signing_key = SigningKey::from_bytes(&seed);
@@ -232,7 +232,7 @@ pub fn export_service_identity_trust_anchor<P: ServiceIdentityProfile>(
     path: &Path,
 ) -> Result<ServiceIdentityTrustAnchor> {
     let anchor = signer.trust_anchor()?;
-    prepare_parent(path)?;
+    ensure_parent(path)?;
     let envelope = CultCacheEnvelope {
         key: P::TRUST_ANCHOR_KEY.into(),
         r#type: P::TRUST_ANCHOR_TYPE.into(),
@@ -364,14 +364,22 @@ fn private_envelope<P: ServiceIdentityProfile>(
     })
 }
 
-fn prepare_parent(path: &Path) -> Result<()> {
+fn ensure_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("service identity path has no parent"))?;
     std::fs::create_dir_all(parent)?;
+    Ok(())
+}
+
+fn prepare_private_parent(path: &Path) -> Result<()> {
+    ensure_parent(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("service identity path has no parent"))?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
@@ -628,8 +636,23 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let signer =
             enroll_service_identity_at::<IdunnServiceIdentity>(&temp.path().join("private.ccmp"))?;
-        let output = temp.path().join("public.ccmp");
+        let public_parent = temp.path().join("public");
+        std::fs::create_dir(&public_parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&public_parent, std::fs::Permissions::from_mode(0o750))?;
+        }
+        let output = public_parent.join("public.ccmp");
         let anchor = export_service_identity_trust_anchor(&signer, &output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&public_parent)?.permissions().mode() & 0o777,
+                0o750
+            );
+        }
         let bytes = std::fs::read(&output)?;
         assert!(
             !bytes
