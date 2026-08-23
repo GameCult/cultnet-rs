@@ -182,6 +182,24 @@ where
         let mut header = [0_u8; FRAME_HEADER_BYTES];
         self.stream.read_exact(&mut header)?;
         let payload_len = u32::from_be_bytes(header) as usize;
+        if let Some(max_payload_bytes) = self
+            .profile
+            .transports
+            .iter()
+            .find(|transport| transport.protocol == CultNetTransportProtocol::TcpFramed)
+            .and_then(|transport| {
+                transport
+                    .channels
+                    .iter()
+                    .find(|channel| channel.channel_id == "schema")
+            })
+            .and_then(|channel| channel.max_payload_bytes)
+            && payload_len > max_payload_bytes as usize
+        {
+            return Err(anyhow!(
+                "tcp_framed payload length {payload_len} exceeds advertised maximum {max_payload_bytes}"
+            ));
+        }
         let mut payload = vec![0_u8; payload_len];
         self.stream.read_exact(&mut payload)?;
         self.stats.bytes_received += (FRAME_HEADER_BYTES + payload_len) as u64;
