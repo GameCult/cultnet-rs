@@ -125,6 +125,7 @@ pub struct CultNetRudpSession {
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
     next_sequence: u32,
+    next_sequenced_by_channel: BTreeMap<String, u32>,
     next_fragment_id: u16,
     connected: bool,
     last_received_at_ms: Option<u64>,
@@ -145,6 +146,7 @@ impl CultNetRudpSession {
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
             next_sequence: options.initial_sequence,
+            next_sequenced_by_channel: BTreeMap::new(),
             next_fragment_id: 1,
             connected: false,
             last_received_at_ms: None,
@@ -176,6 +178,7 @@ impl CultNetRudpSession {
         self.last_received_at_ms = None;
         self.highest_received_sequence = None;
         self.received_sequences.clear();
+        self.next_sequenced_by_channel.clear();
         self.pending_reliable.clear();
         self.ordered_next_sequence_by_channel.clear();
         self.ordered_buffers.clear();
@@ -291,6 +294,9 @@ impl CultNetRudpSession {
                 "Cannot send RUDP data before the session is connected"
             ));
         }
+        if options.ordered && !options.reliable {
+            return Err(anyhow!("RUDP ordered delivery requires reliability"));
+        }
         self.purge_expired_reliable(options.now_ms);
 
         if let Some(max_fragment_bytes) = max_fragment_bytes {
@@ -370,7 +376,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Ping {
-            self.remember_received(packet.sequence);
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: Some(self.create_packet(
@@ -391,7 +396,6 @@ impl CultNetRudpSession {
         if packet.packet_type == CultNetRudpPacketType::Ack
             || packet.packet_type == CultNetRudpPacketType::Pong
         {
-            self.remember_received(packet.sequence);
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
@@ -407,7 +411,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Disconnect {
-            self.remember_received(packet.sequence);
             self.connected = false;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -430,8 +433,10 @@ impl CultNetRudpSession {
             });
         }
 
-        let duplicate = self.received_sequences.contains(&packet.sequence);
-        self.remember_received(packet.sequence);
+        let duplicate = packet.reliable && self.received_sequences.contains(&packet.sequence);
+        if packet.reliable {
+            self.remember_received(packet.sequence);
+        }
         if duplicate {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -454,11 +459,12 @@ impl CultNetRudpSession {
             });
         };
         if packet.sequenced && !ordered {
-            let highest = self
+            let newest_sequence = next_sequence.saturating_sub(1);
+            if self
                 .highest_delivered_sequenced_by_channel
-                .entry(frame.channel_id.clone())
-                .or_insert(frame.sequence);
-            if frame.sequence < *highest {
+                .get(&frame.channel_id)
+                .is_some_and(|highest| newest_sequence <= *highest)
+            {
                 return Ok(CultNetRudpReceiveResult {
                     delivered: Vec::new(),
                     reply: None,
@@ -468,7 +474,8 @@ impl CultNetRudpSession {
                     disconnect_reason: Vec::new(),
                 });
             }
-            *highest = frame.sequence;
+            self.highest_delivered_sequenced_by_channel
+                .insert(frame.channel_id.clone(), newest_sequence);
         }
         let delivered = if ordered {
             self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
@@ -581,11 +588,24 @@ impl CultNetRudpSession {
         fragment_index: u16,
         fragment_count: u16,
     ) -> CultNetRudpPacket {
-        let sequence = self.next_sequence;
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .expect("sequence overflow");
+        let sequence = if reliable {
+            let sequence = self.next_sequence;
+            self.next_sequence = self
+                .next_sequence
+                .checked_add(1)
+                .expect("reliable sequence overflow");
+            sequence
+        } else if sequenced {
+            let next = self
+                .next_sequenced_by_channel
+                .entry(channel_id.to_string())
+                .or_insert(1);
+            let sequence = *next;
+            *next = next.checked_add(1).expect("sequenced channel overflow");
+            sequence
+        } else {
+            0
+        };
         let (ack, ack_mask) = self.ack_state();
         CultNetRudpPacket {
             packet_type,

@@ -466,6 +466,116 @@ fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
 }
 
 #[test]
+fn rudp_lossy_packets_cannot_create_reliable_ordered_gaps() -> Result<()> {
+    let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 198,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 198,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 1, Vec::new())?;
+    client.receive(&accept, 2)?;
+
+    let ping = client.create_ping(b"pulse".to_vec());
+    let pong = server
+        .receive(&ping, 3)?
+        .reply
+        .expect("ping should produce pong");
+    let realtime = server.send(
+        "realtime",
+        b"discarded realtime".to_vec(),
+        CultNetRudpSendOptions::default(),
+    )?;
+    let latest = server.send(
+        "latest",
+        b"discarded latest state".to_vec(),
+        CultNetRudpSendOptions {
+            sequenced: true,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    let schema = server.send(
+        "schema",
+        b"committed response".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+
+    assert_eq!(ping.sequence, 0);
+    assert_eq!(pong.sequence, 0);
+    assert_eq!(realtime.sequence, 0);
+    assert_eq!(latest.sequence, 1);
+    assert_eq!(schema.sequence, accept.sequence + 1);
+    assert_eq!(
+        client.receive(&schema, 4)?.delivered[0].payload,
+        b"committed response"
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_unreliable_sequenced_delivery_is_scoped_to_its_channel() -> Result<()> {
+    let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 197,
+        initial_sequence: 50,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 197,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
+    sender.receive(&accept, 2)?;
+    let options = CultNetRudpSendOptions {
+        sequenced: true,
+        ..CultNetRudpSendOptions::default()
+    };
+    let older = sender.send("latest", b"older".to_vec(), options.clone())?;
+    let newer = sender.send("latest", b"newer".to_vec(), options)?;
+
+    assert_eq!(older.sequence, 1);
+    assert_eq!(newer.sequence, 2);
+    assert_eq!(receiver.receive(&newer, 3)?.delivered[0].payload, b"newer");
+    assert!(receiver.receive(&older, 4)?.delivered.is_empty());
+    Ok(())
+}
+
+#[test]
+fn rudp_rejects_unreliable_ordered_delivery() -> Result<()> {
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 196,
+        ..CultNetRudpSessionOptions::default()
+    });
+    session.assume_connected(0);
+    let error = session
+        .send(
+            "schema",
+            b"cannot order what will not retransmit".to_vec(),
+            CultNetRudpSendOptions {
+                ordered: true,
+                ..CultNetRudpSendOptions::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ordered delivery requires reliability")
+    );
+    Ok(())
+}
+
+#[test]
 fn rudp_session_bounds_pending_reliable_packets_before_enqueue() -> Result<()> {
     let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 102,
