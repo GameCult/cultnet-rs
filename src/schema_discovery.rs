@@ -368,6 +368,13 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             Some("idunn.deployment_brake"),
         )?,
         schema_registration(
+            include_str!("../contracts/idunn.lifecycle-brake.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("idunn.lifecycle_brake.v1"),
+            Some("idunn.lifecycle_brake"),
+        )?,
+        schema_registration(
             include_str!("../contracts/gamecult.runtime-presence-health.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],

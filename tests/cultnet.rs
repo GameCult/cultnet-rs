@@ -380,6 +380,33 @@ fn builtin_schema_registry_exposes_runtime_authority_document_payloads() -> Resu
 }
 
 #[test]
+fn builtin_schema_registry_exposes_idunn_lifecycle_brake() -> Result<()> {
+    let registry = builtin_schema_registry()?;
+    let descriptor = registry
+        .get(
+            "https://github.com/GameCult/cultnet-rs/contracts/idunn.lifecycle-brake.schema.json",
+            true,
+        )
+        .expect("Idunn lifecycle brake schema is registered");
+    assert_eq!(descriptor.kind, CultNetSchemaKind::DocumentPayload);
+    assert_eq!(
+        descriptor.schema_version.as_deref(),
+        Some("idunn.lifecycle_brake.v1")
+    );
+    assert_eq!(
+        descriptor.document_type.as_deref(),
+        Some("idunn.lifecycle_brake")
+    );
+    assert!(
+        descriptor
+            .schema_json
+            .as_deref()
+            .is_some_and(|schema| schema.contains("idunn.lifecycle_brake.v1"))
+    );
+    Ok(())
+}
+
+#[test]
 fn schema_discovery_round_trips_over_legacy_gamecult_contract_when_inline_schemas_are_requested()
 -> Result<()> {
     let registry = {

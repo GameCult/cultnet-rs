@@ -54,6 +54,7 @@ surface:
 - schema catalog request/response messages
 - the canonical `ghostlight.agent-state` document payload schema
 - the Idunn-owned `idunn.deployment_brake.v1` document payload schema
+- the root-owned per-target `idunn.lifecycle_brake.v1` document payload schema
 
 Use `builtin_schema_registry()` when you want the standard catalog, or register
 your own closed-world schema set with `CultNetSchemaRegistry`. Discovery stays
@@ -66,6 +67,12 @@ authority, wrong runtime or scope, engagement, and expiry all refuse actuation.
 A released record permits only its named release and deployment attempt during
 a signed authorization interval of at most fifteen minutes. Release status by
 itself is not deployment authority.
+
+`evaluate_idunn_continuity_restart()` reads the separate lifecycle brake only
+when Idunn is deciding whether to restart one already-admitted target. An absent
+record allows continuity; a present record must bind the exact Idunn runtime and
+target and be explicitly released. It does not gate Idunn startup, deployment,
+route admission, or another target.
 
 ## Local Fast Lane
 

@@ -1,6 +1,7 @@
 mod contracts;
 mod framing;
 mod idunn_deployment_brake;
+mod idunn_lifecycle_brake;
 mod provider_health_contracts;
 mod replication;
 mod rudp;
@@ -14,6 +15,7 @@ mod transport;
 pub use contracts::*;
 pub use framing::*;
 pub use idunn_deployment_brake::*;
+pub use idunn_lifecycle_brake::*;
 pub use provider_health_contracts::*;
 pub use replication::*;
 pub use rudp::*;

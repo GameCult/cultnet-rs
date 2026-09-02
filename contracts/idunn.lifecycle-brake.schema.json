@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/idunn.lifecycle-brake.schema.json",
+  "title": "Idunn lifecycle brake",
+  "description": "Root-owned per-target continuity-restart brake. It has no authority over Idunn startup, deployment, route admission, or unrelated targets.",
+  "type": "array",
+  "prefixItems": [
+    { "const": "idunn.lifecycle_brake.v1" },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "enum": ["engaged", "released"] },
+    { "type": "string", "minLength": 1, "maxLength": 256 },
+    { "type": "integer", "minimum": 1 },
+    { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] }
+  ],
+  "minItems": 9,
+  "maxItems": 9,
+  "allOf": [
+    {
+      "if": {
+        "prefixItems": [true, true, true, true, true, { "const": "engaged" }]
+      },
+      "then": {
+        "prefixItems": [true, true, true, true, true, true, true, true, { "type": "null" }]
+      }
+    }
+  ]
+}
