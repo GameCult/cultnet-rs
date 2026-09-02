@@ -530,8 +530,10 @@ impl OdinTopologyDisagreement {
 }
 
 /// Odin-owned signed correlation of Idunn's exact Expected projection with
-/// current Idunn activation and provider-signed presence. The signature covers
-/// the canonical positional encoding with `signature` empty.
+/// current Idunn activation and provider-signed presence. Presence state and
+/// write-lease observation remain explicit so an opaque Ready bit cannot cross
+/// Idunn's warming/fencing boundary. The signature covers the canonical
+/// positional encoding with `signature` empty.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "odin.runtime_topology_correlation",
@@ -551,33 +553,37 @@ pub struct OdinRuntimeTopologyCorrelationRecord {
     #[cultcache(key = 5)]
     pub signed_presence_sha256: Option<String>,
     #[cultcache(key = 6)]
-    pub runtime_id: String,
+    pub observed_presence_state: Option<String>,
     #[cultcache(key = 7)]
-    pub runtime_instance_id: Option<String>,
+    pub observed_write_lease_sha256: Option<String>,
     #[cultcache(key = 8)]
-    pub present: bool,
+    pub runtime_id: String,
     #[cultcache(key = 9)]
-    pub ready: bool,
+    pub runtime_instance_id: Option<String>,
     #[cultcache(key = 10)]
-    pub dependencies: Vec<OdinRuntimeDependencyEvidence>,
+    pub present: bool,
     #[cultcache(key = 11)]
-    pub disagreements: Vec<OdinTopologyDisagreement>,
+    pub ready: bool,
     #[cultcache(key = 12)]
-    pub signer_identity_id: String,
+    pub dependencies: Vec<OdinRuntimeDependencyEvidence>,
     #[cultcache(key = 13)]
-    pub publisher_sequence: u64,
+    pub disagreements: Vec<OdinTopologyDisagreement>,
     #[cultcache(key = 14)]
-    pub observed_at_unix_millis: u64,
+    pub signer_identity_id: String,
     #[cultcache(key = 15)]
+    pub publisher_sequence: u64,
+    #[cultcache(key = 16)]
+    pub observed_at_unix_millis: u64,
+    #[cultcache(key = 17)]
     pub signature_algorithm: String,
-    #[cultcache(key = 16, bytes)]
+    #[cultcache(key = 18, bytes)]
     pub signature: Vec<u8>,
 }
 
 impl OdinRuntimeTopologyCorrelationRecord {
     pub fn decode_canonical_signed_payload(payload: &[u8]) -> Result<(Self, Vec<u8>)> {
-        if messagepack_array_len(payload) != Some(17) {
-            bail!("topology correlation is not the 17-field positional contract");
+        if messagepack_array_len(payload) != Some(19) {
+            bail!("topology correlation is not the 19-field positional contract");
         }
         let receipt: Self =
             rmp_serde::from_slice(payload).context("decoding runtime topology correlation")?;
@@ -612,6 +618,7 @@ impl OdinRuntimeTopologyCorrelationRecord {
     pub fn validate_against_expected(
         &self,
         expected: &IdunnExpectedIncarnationRecord,
+        current_write_lease_sha256: Option<&str>,
     ) -> Result<()> {
         self.validate()?;
         expected.validate()?;
@@ -641,6 +648,27 @@ impl OdinRuntimeTopologyCorrelationRecord {
                 bail!("ready dependency does not meet Expected capacity");
             }
         }
+        if let Some(current_write_lease_sha256) = current_write_lease_sha256 {
+            validate_required_sha256(current_write_lease_sha256, "current write lease sha256")?;
+        }
+        if expected.write_lease_required {
+            if self
+                .observed_write_lease_sha256
+                .as_deref()
+                .is_some_and(|observed| Some(observed) != current_write_lease_sha256)
+            {
+                bail!("observed write lease is not the current Idunn grant");
+            }
+            if self.ready
+                && (self.observed_write_lease_sha256.is_none()
+                    || current_write_lease_sha256.is_none())
+            {
+                bail!("Ready stateful topology lacks the exact current write lease");
+            }
+        } else if self.observed_write_lease_sha256.is_some() || current_write_lease_sha256.is_some()
+        {
+            bail!("stateless Expected topology cannot carry a process write lease");
+        }
         Ok(())
     }
 
@@ -658,6 +686,26 @@ impl OdinRuntimeTopologyCorrelationRecord {
         }
         validate_optional_sha256(&self.current_activation_sha256, "current activation sha256")?;
         validate_optional_sha256(&self.signed_presence_sha256, "signed presence sha256")?;
+        validate_optional_identifier(&self.observed_presence_state, "observed presence state")?;
+        validate_optional_sha256(
+            &self.observed_write_lease_sha256,
+            "observed write lease sha256",
+        )?;
+        match (
+            &self.signed_presence_sha256,
+            &self.observed_presence_state,
+            &self.observed_write_lease_sha256,
+        ) {
+            (None, None, None) => {}
+            (Some(_), Some(state), write_lease)
+                if matches!(state.as_str(), "warming" | "active" | "degraded" | "failed") =>
+            {
+                if state == "warming" && write_lease.is_some() {
+                    bail!("warming topology presence cannot carry a process write lease");
+                }
+            }
+            _ => bail!("signed presence state or write-lease observation is partial"),
+        }
         validate_authority_identifier(&self.runtime_id, "runtime id")?;
         validate_optional_sha256(&self.runtime_instance_id, "runtime instance id")?;
         let has_runtime_evidence =
@@ -683,6 +731,7 @@ impl OdinRuntimeTopologyCorrelationRecord {
         }
         if self.ready
             && (!self.present
+                || self.observed_presence_state.as_deref() != Some("active")
                 || !self.disagreements.is_empty()
                 || self
                     .dependencies
@@ -1218,6 +1267,8 @@ mod tests {
             expected: true,
             current_activation_sha256: Some(digest('9')),
             signed_presence_sha256: Some(digest('a')),
+            observed_presence_state: Some("active".into()),
+            observed_write_lease_sha256: Some(digest('c')),
             runtime_id: expected.runtime_id.clone(),
             runtime_instance_id: Some(digest('b')),
             present: true,
@@ -1234,6 +1285,14 @@ mod tests {
             signature_algorithm: "ed25519".into(),
             signature: vec![7; 64],
         }
+    }
+
+    fn validate_against_current_lease(
+        receipt: &OdinRuntimeTopologyCorrelationRecord,
+        expected: &IdunnExpectedIncarnationRecord,
+    ) -> Result<()> {
+        let current_lease = digest('c');
+        receipt.validate_against_expected(expected, Some(&current_lease))
     }
 
     fn topology_anchor() -> GameCultServiceTrustAnchorRecord {
@@ -1524,9 +1583,9 @@ mod tests {
         );
 
         let receipt = topology_correlation(&expected);
-        receipt.validate_against_expected(&expected)?;
+        validate_against_current_lease(&receipt, &expected)?;
         let receipt_bytes = receipt.canonical_bytes()?;
-        assert_eq!(&receipt_bytes[..3], &[0xdc, 0, 17]);
+        assert_eq!(&receipt_bytes[..3], &[0xdc, 0, 19]);
         let (decoded, unsigned) =
             OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(&receipt_bytes)?;
         assert_eq!(decoded, receipt);
@@ -1552,7 +1611,7 @@ mod tests {
         assert!(IdunnExpectedIncarnationRecord::decode_canonical(&noncanonical_expected).is_err());
 
         let receipt = topology_correlation(&expected_incarnation()).canonical_bytes()?;
-        let mut noncanonical_receipt = vec![0xdd, 0, 0, 0, 17];
+        let mut noncanonical_receipt = vec![0xdd, 0, 0, 0, 19];
         noncanonical_receipt.extend_from_slice(&receipt[3..]);
         assert!(
             OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
@@ -1640,30 +1699,30 @@ mod tests {
         let mut value = topology_correlation(&expected);
         value.target = "epiphany".into();
         assert!(value.validate().is_ok());
-        assert!(value.validate_against_expected(&expected).is_err());
+        assert!(validate_against_current_lease(&value, &expected).is_err());
 
         let mut value = topology_correlation(&expected);
         value.runtime_id = "ghostlight-other-runtime".into();
-        assert!(value.validate_against_expected(&expected).is_err());
+        assert!(validate_against_current_lease(&value, &expected).is_err());
 
         let mut value = topology_correlation(&expected);
         value.expected_projection_sha256 = digest('c');
-        assert!(value.validate_against_expected(&expected).is_err());
+        assert!(validate_against_current_lease(&value, &expected).is_err());
 
         let mut value = topology_correlation(&expected);
         value.dependencies.pop();
         assert!(value.validate().is_ok());
-        assert!(value.validate_against_expected(&expected).is_err());
+        assert!(validate_against_current_lease(&value, &expected).is_err());
 
         let mut value = topology_correlation(&expected);
         value.dependencies[0].provider_id = Some("odin-substitute".into());
         assert!(value.validate().is_ok());
-        assert!(value.validate_against_expected(&expected).is_err());
+        assert!(validate_against_current_lease(&value, &expected).is_err());
 
         let mut value = topology_correlation(&expected);
         value.dependencies[0].kind = "required".into();
         assert!(value.validate().is_ok());
-        assert!(value.validate_against_expected(&expected).is_err());
+        assert!(validate_against_current_lease(&value, &expected).is_err());
 
         let mut value = topology_correlation(&expected);
         value.dependencies[0].observed_capacity = Some(0);
@@ -1674,7 +1733,7 @@ mod tests {
         let mut stricter = expected.clone();
         stricter.dependencies[0].minimum_capacity = 2;
         value.expected_projection_sha256 = stricter.canonical_sha256().unwrap();
-        assert!(value.validate_against_expected(&stricter).is_err());
+        assert!(validate_against_current_lease(&value, &stricter).is_err());
     }
 
     #[test]
@@ -1682,6 +1741,8 @@ mod tests {
         let expected = expected_incarnation();
         let mut value = topology_correlation(&expected);
         value.signed_presence_sha256 = None;
+        value.observed_presence_state = None;
+        value.observed_write_lease_sha256 = None;
         value.present = false;
         value.ready = false;
         assert!(value.validate().is_err());
@@ -1744,6 +1805,61 @@ mod tests {
 
         value.disagreements[1].code = "schema-mismatch".into();
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn topology_correlation_preserves_warming_and_exact_write_lease_authority() {
+        let expected = expected_incarnation();
+        let value = topology_correlation(&expected);
+        validate_against_current_lease(&value, &expected).unwrap();
+        assert!(
+            value
+                .validate_against_expected(&expected, Some(&digest('d')))
+                .is_err()
+        );
+        assert!(value.validate_against_expected(&expected, None).is_err());
+
+        let mut digest_only_ready = topology_correlation(&expected);
+        digest_only_ready.observed_write_lease_sha256 = None;
+        digest_only_ready.validate().unwrap();
+        assert!(
+            digest_only_ready
+                .validate_against_expected(&expected, Some(&digest('c')))
+                .is_err()
+        );
+
+        let mut warming = topology_correlation(&expected);
+        warming.observed_presence_state = Some("warming".into());
+        warming.ready = false;
+        assert!(warming.validate().is_err());
+        warming.observed_write_lease_sha256 = None;
+        warming.validate().unwrap();
+        warming.validate_against_expected(&expected, None).unwrap();
+        warming.ready = true;
+        assert!(warming.validate().is_err());
+
+        let mut partial = topology_correlation(&expected);
+        partial.observed_presence_state = None;
+        assert!(partial.validate().is_err());
+        let mut partial = topology_correlation(&expected);
+        partial.signed_presence_sha256 = None;
+        assert!(partial.validate().is_err());
+
+        let mut stateless = expected.clone();
+        stateless.state_schema_generation = None;
+        stateless.state_contract_sha256 = None;
+        stateless.write_lease_required = false;
+        let mut stateless_receipt = topology_correlation(&stateless);
+        stateless_receipt.observed_write_lease_sha256 = None;
+        stateless_receipt
+            .validate_against_expected(&stateless, None)
+            .unwrap();
+        stateless_receipt.observed_write_lease_sha256 = Some(digest('c'));
+        assert!(
+            stateless_receipt
+                .validate_against_expected(&stateless, Some(&digest('c')))
+                .is_err()
+        );
     }
 
     #[test]
