@@ -2,7 +2,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use cultcache_rs::DatabaseEntry;
 use serde::{Deserialize, Serialize};
 
-use crate::{IdunnServiceIdentity, derive_service_identity_id};
+use crate::runtime_authority_contracts::{
+    GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA, GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE,
+};
+use crate::{GameCultProviderHealthIdentity, IdunnServiceIdentity, derive_service_identity_id};
 
 pub const GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA: &str = "gamecult.service_trust_anchor.v1";
 pub const IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA: &str =
@@ -258,6 +261,17 @@ impl GameCultServiceTrustAnchorRecord {
                     != derive_service_identity_id::<IdunnServiceIdentity>(&self.signer_public_key)?)
         {
             bail!("Idunn provider-health trust anchor profile is invalid");
+        }
+        if (self.signed_schema == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA
+            || self.signing_purpose == GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE)
+            && (self.signed_schema != GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA
+                || self.signing_purpose != GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE
+                || self.signer_identity_id
+                    != derive_service_identity_id::<GameCultProviderHealthIdentity>(
+                        &self.signer_public_key,
+                    )?)
+        {
+            bail!("runtime presence trust anchor profile is invalid");
         }
         Ok(())
     }

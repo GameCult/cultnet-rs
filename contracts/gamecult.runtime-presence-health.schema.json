@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/gamecult.runtime-presence-health.schema.json",
+  "title": "GameCult runtime presence health",
+  "description": "Provider-signed canonical positional claim from one exact runtime launch. Present authority also requires the matching Idunn-published current activation. Capability ordering and uniqueness by capability/schema/compatibility are enforced by the typed runtime contract.",
+  "type": "array",
+  "prefixItems": [
+    { "const": "gamecult.runtime_presence_health.v1" },
+    { "$ref": "#/$defs/identifier" },
+    { "$ref": "#/$defs/sha256" },
+    { "$ref": "#/$defs/sha256" },
+    { "$ref": "#/$defs/identifier" },
+    { "$ref": "#/$defs/sha256" },
+    { "$ref": "#/$defs/sha256" },
+    { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+    { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    { "$ref": "#/$defs/identifier" },
+    { "$ref": "#/$defs/sha256" },
+    { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 2048 }, { "type": "null" }] },
+    {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capability" },
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    { "$ref": "#/$defs/identifier" },
+    { "enum": ["warming", "active", "degraded", "failed"] },
+    { "type": "string", "maxLength": 512 },
+    { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    { "$ref": "#/$defs/identifier" },
+    { "type": "integer", "minimum": 1 },
+    { "type": "integer", "minimum": 1 },
+    { "const": "ed25519" },
+    {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 64,
+      "maxItems": 64
+    }
+  ],
+  "minItems": 22,
+  "maxItems": 22,
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "prefixItems": [true, true, true, true, true, true, true, { "type": "null" }, { "type": "null" }]
+        },
+        {
+          "prefixItems": [true, true, true, true, true, true, true, { "$ref": "#/$defs/identifier" }, { "$ref": "#/$defs/sha256" }]
+        }
+      ]
+    },
+    {
+      "if": {
+        "prefixItems": [true, true, true, true, true, true, true, true, true, true, true, true, true, true, { "const": "warming" }]
+      },
+      "then": {
+        "prefixItems": [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, { "type": "null" }]
+      }
+    },
+    {
+      "if": {
+        "prefixItems": [true, true, true, true, true, true, true, { "type": "null" }]
+      },
+      "then": {
+        "prefixItems": [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, { "type": "null" }]
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256-[0-9a-f]{64}$"
+    },
+    "capability": {
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/identifier" },
+        { "$ref": "#/$defs/identifier" },
+        { "$ref": "#/$defs/identifier" },
+        { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    }
+  }
+}

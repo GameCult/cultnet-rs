@@ -334,6 +334,42 @@ fn builtin_schema_registry_advertises_canonical_ghostlight_schema_without_inline
 }
 
 #[test]
+fn builtin_schema_registry_exposes_runtime_authority_document_payloads() -> Result<()> {
+    let registry = builtin_schema_registry()?;
+    for (schema_id, schema_version, document_type) in [
+        (
+            "https://github.com/GameCult/cultnet-rs/contracts/gamecult.runtime-presence-health.schema.json",
+            "gamecult.runtime_presence_health.v1",
+            "gamecult.runtime_presence_health",
+        ),
+        (
+            "https://github.com/GameCult/cultnet-rs/contracts/idunn.runtime-activation.schema.json",
+            "idunn.runtime_activation.v1",
+            "idunn.runtime_activation",
+        ),
+        (
+            "https://github.com/GameCult/cultnet-rs/contracts/idunn.process-write-lease.schema.json",
+            "idunn.process_write_lease.v1",
+            "idunn.process_write_lease",
+        ),
+    ] {
+        let descriptor = registry
+            .get(schema_id, true)
+            .expect("runtime authority schema is registered");
+        assert_eq!(descriptor.kind, CultNetSchemaKind::DocumentPayload);
+        assert_eq!(descriptor.schema_version.as_deref(), Some(schema_version));
+        assert_eq!(descriptor.document_type.as_deref(), Some(document_type));
+        assert!(
+            descriptor
+                .schema_json
+                .as_deref()
+                .is_some_and(|schema| schema.contains(schema_version))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn schema_discovery_round_trips_over_legacy_gamecult_contract_when_inline_schemas_are_requested()
 -> Result<()> {
     let registry = {

@@ -367,6 +367,27 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             Some("idunn.deployment_brake.v1"),
             Some("idunn.deployment_brake"),
         )?,
+        schema_registration(
+            include_str!("../contracts/gamecult.runtime-presence-health.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("gamecult.runtime_presence_health.v1"),
+            Some("gamecult.runtime_presence_health"),
+        )?,
+        schema_registration(
+            include_str!("../contracts/idunn.runtime-activation.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("idunn.runtime_activation.v1"),
+            Some("idunn.runtime_activation"),
+        )?,
+        schema_registration(
+            include_str!("../contracts/idunn.process-write-lease.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("idunn.process_write_lease.v1"),
+            Some("idunn.process_write_lease"),
+        )?,
     ] {
         registry.register(registration)?;
     }

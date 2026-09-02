@@ -70,6 +70,17 @@ impl ServiceSignaturePurpose<GameCultProviderHealthIdentity> for IdunnSignedDaem
     const PURPOSE: &'static [u8] = b"idunn.signed_daemon_health.v1";
 }
 
+/// Provider-owned runtime presence and health. This is deliberately distinct
+/// from the legacy daemon-health purpose so an old signature cannot acquire
+/// deployment-incarnation authority by substitution.
+pub struct GameCultRuntimePresenceHealthPurpose;
+
+impl ServiceSignaturePurpose<GameCultProviderHealthIdentity>
+    for GameCultRuntimePresenceHealthPurpose
+{
+    const PURPOSE: &'static [u8] = b"gamecult.runtime_presence_health.v1";
+}
+
 impl ServiceIdentityProfile for GameCultProviderHealthIdentity {
     const PRIVATE_TYPE: &'static str = "gamecult.provider_health_identity.private.v1";
     const PRIVATE_SCHEMA: &'static str = "gamecult.provider_health_identity.private.v1";
@@ -699,6 +710,39 @@ mod tests {
         assert_ne!(
             derive_service_identity_id::<GameCultProviderHealthIdentity>(&anchor.public_key)?,
             derive_service_identity_id::<IdunnServiceIdentity>(&anchor.public_key)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_presence_and_legacy_health_purposes_cannot_be_substituted() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let signer = enroll_service_identity_at::<GameCultProviderHealthIdentity>(
+            &temp.path().join("provider-runtime-presence.cc"),
+        )?;
+        let anchor = signer.trust_anchor()?;
+        let payload = b"runtime-presence";
+
+        let presence = signer.sign::<GameCultRuntimePresenceHealthPurpose>(payload);
+        verify_service_identity_signature::<
+            GameCultProviderHealthIdentity,
+            GameCultRuntimePresenceHealthPurpose,
+        >(&anchor, payload, &presence)?;
+        assert!(
+            verify_service_identity_signature::<
+                GameCultProviderHealthIdentity,
+                IdunnSignedDaemonHealthPurpose,
+            >(&anchor, payload, &presence)
+            .is_err()
+        );
+
+        let legacy = signer.sign::<IdunnSignedDaemonHealthPurpose>(payload);
+        assert!(
+            verify_service_identity_signature::<
+                GameCultProviderHealthIdentity,
+                GameCultRuntimePresenceHealthPurpose,
+            >(&anchor, payload, &legacy)
+            .is_err()
         );
         Ok(())
     }
