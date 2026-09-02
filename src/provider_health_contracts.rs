@@ -1,5 +1,6 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use cultcache_rs::DatabaseEntry;
+use serde::{Deserialize, Serialize};
 
 use crate::{IdunnServiceIdentity, derive_service_identity_id};
 
@@ -56,9 +57,88 @@ pub struct IdunnSignedDaemonHealthRecord {
     pub signature: Vec<u8>,
     #[cultcache(key = 16)]
     pub private_state_exposed: bool,
+    #[cultcache(key = 17, default)]
+    pub activation_witness_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyIdunnSignedDaemonHealthWire {
+    schema_version: String,
+    daemon_id: String,
+    health_contract: String,
+    source_runtime_id: String,
+    state: String,
+    detail: String,
+    signer_identity_id: String,
+    publisher_incarnation_id: String,
+    publisher_sequence: u64,
+    observed_at_unix_millis: u64,
+    release_id: Option<String>,
+    release_witness_sha256: Option<String>,
+    source_commit: Option<String>,
+    deployment_id: Option<String>,
+    signature_algorithm: String,
+    #[serde(with = "serde_bytes")]
+    signature: Vec<u8>,
+    private_state_exposed: bool,
+}
+
+impl From<LegacyIdunnSignedDaemonHealthWire> for IdunnSignedDaemonHealthRecord {
+    fn from(value: LegacyIdunnSignedDaemonHealthWire) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            daemon_id: value.daemon_id,
+            health_contract: value.health_contract,
+            source_runtime_id: value.source_runtime_id,
+            state: value.state,
+            detail: value.detail,
+            signer_identity_id: value.signer_identity_id,
+            publisher_incarnation_id: value.publisher_incarnation_id,
+            publisher_sequence: value.publisher_sequence,
+            observed_at_unix_millis: value.observed_at_unix_millis,
+            release_id: value.release_id,
+            release_witness_sha256: value.release_witness_sha256,
+            source_commit: value.source_commit,
+            deployment_id: value.deployment_id,
+            signature_algorithm: value.signature_algorithm,
+            signature: value.signature,
+            private_state_exposed: value.private_state_exposed,
+            activation_witness_sha256: None,
+        }
+    }
 }
 
 impl IdunnSignedDaemonHealthRecord {
+    /// Decode the canonical current or pre-activation positional wire and
+    /// return the exact wire generation's unsigned signature payload.
+    pub fn decode_canonical_signed_payload(payload: &[u8]) -> Result<(Self, Vec<u8>)> {
+        match messagepack_array_len(payload) {
+            Some(18) => {
+                let statement: Self = rmp_serde::from_slice(payload)
+                    .context("decoding generic signed daemon health")?;
+                if rmp_serde::to_vec(&statement)? != payload {
+                    bail!("signed daemon health payload is not canonical positional MessagePack");
+                }
+                let mut unsigned = statement.clone();
+                unsigned.signature.clear();
+                Ok((statement, rmp_serde::to_vec(&unsigned)?))
+            }
+            Some(17) => {
+                let legacy: LegacyIdunnSignedDaemonHealthWire = rmp_serde::from_slice(payload)
+                    .context("decoding legacy generic signed daemon health")?;
+                if rmp_serde::to_vec(&legacy)? != payload {
+                    bail!("signed daemon health payload is not canonical positional MessagePack");
+                }
+                let mut unsigned = legacy.clone();
+                unsigned.signature.clear();
+                let unsigned_payload = rmp_serde::to_vec(&unsigned)?;
+                Ok((legacy.into(), unsigned_payload))
+            }
+            _ => bail!("signed daemon health payload is not canonical positional MessagePack"),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA {
             bail!("signed daemon health schema is unsupported");
@@ -85,10 +165,29 @@ impl IdunnSignedDaemonHealthRecord {
             &self.source_commit,
         )?;
         validate_optional_identifier(&self.deployment_id, "deployment id")?;
+        validate_optional_sha256(&self.activation_witness_sha256, "activation witness sha256")?;
         if self.private_state_exposed {
             bail!("signed daemon health exposes private state");
         }
         Ok(())
+    }
+}
+
+fn messagepack_array_len(payload: &[u8]) -> Option<usize> {
+    match *payload.first()? {
+        marker @ 0x90..=0x9f => Some(usize::from(marker & 0x0f)),
+        0xdc => Some(usize::from(u16::from_be_bytes([
+            *payload.get(1)?,
+            *payload.get(2)?,
+        ]))),
+        0xdd => usize::try_from(u32::from_be_bytes([
+            *payload.get(1)?,
+            *payload.get(2)?,
+            *payload.get(3)?,
+            *payload.get(4)?,
+        ]))
+        .ok(),
+        _ => None,
     }
 }
 
@@ -307,6 +406,13 @@ fn validate_optional_identifier(value: &Option<String>, label: &str) -> Result<(
     Ok(())
 }
 
+fn validate_optional_sha256(value: &Option<String>, label: &str) -> Result<()> {
+    if value.as_deref().is_some_and(|value| !is_sha256(value)) {
+        bail!("{label} is malformed");
+    }
+    Ok(())
+}
+
 fn validate_optional_release_binding(
     release_id: &Option<String>,
     witness: &Option<String>,
@@ -363,6 +469,7 @@ mod tests {
             signature_algorithm: "ed25519".into(),
             signature: vec![6; 64],
             private_state_exposed: false,
+            activation_witness_sha256: Some(format!("sha256-{}", "f".repeat(64))),
         }
     }
 
@@ -429,7 +536,7 @@ mod tests {
         health.validate()?;
         let encoded = rmp_serde::to_vec(&health)?;
         assert_eq!(encoded.first().copied(), Some(0xdc));
-        assert_eq!(&encoded[1..3], &[0, 17]);
+        assert_eq!(&encoded[1..3], &[0, 18]);
         assert!(
             encoded
                 .windows(4)
@@ -453,6 +560,24 @@ mod tests {
             projection
         );
         assert_eq!(authenticated_provider_health_reason_code("missing"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn activation_binding_is_additive_for_legacy_generic_health_records() -> Result<()> {
+        let mut health = signed_health();
+        health.activation_witness_sha256 = None;
+        let mut legacy = rmp_serde::to_vec(&health)?;
+        assert_eq!(&legacy[..3], &[0xdc, 0, 18]);
+        assert_eq!(legacy.pop(), Some(0xc0));
+        legacy[2] = 17;
+        let decoded: IdunnSignedDaemonHealthRecord = rmp_serde::from_slice(&legacy)?;
+        assert_eq!(decoded.activation_witness_sha256, None);
+        decoded.validate()?;
+        let (decoded, unsigned) =
+            IdunnSignedDaemonHealthRecord::decode_canonical_signed_payload(&legacy)?;
+        assert_eq!(decoded.activation_witness_sha256, None);
+        assert_eq!(&unsigned[..3], &[0xdc, 0, 17]);
         Ok(())
     }
 
@@ -481,6 +606,9 @@ mod tests {
         assert!(value.validate().is_err());
         let mut value = signed_health();
         value.publisher_sequence = 0;
+        assert!(value.validate().is_err());
+        let mut value = signed_health();
+        value.activation_witness_sha256 = Some(format!("sha256-{}", "F".repeat(64)));
         assert!(value.validate().is_err());
         let mut value = signed_health();
         value.release_witness_sha256 = None;
