@@ -4,8 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime_authority_contracts::{
     GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA, GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE,
+    ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA, ODIN_RUNTIME_TOPOLOGY_CORRELATION_SIGNING_PURPOSE,
 };
-use crate::{GameCultProviderHealthIdentity, IdunnServiceIdentity, derive_service_identity_id};
+use crate::{
+    GameCultProviderHealthIdentity, IdunnServiceIdentity, OdinTopologyIdentity,
+    derive_service_identity_id,
+};
 
 pub const GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA: &str = "gamecult.service_trust_anchor.v1";
 pub const IDUNN_AUTHENTICATED_PROVIDER_HEALTH_PROJECTION_SCHEMA: &str =
@@ -272,6 +276,16 @@ impl GameCultServiceTrustAnchorRecord {
                     )?)
         {
             bail!("runtime presence trust anchor profile is invalid");
+        }
+        if (self.signed_schema == ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA
+            || self.signing_purpose == ODIN_RUNTIME_TOPOLOGY_CORRELATION_SIGNING_PURPOSE)
+            && (self.signed_schema != ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA
+                || self.signing_purpose != ODIN_RUNTIME_TOPOLOGY_CORRELATION_SIGNING_PURPOSE
+                || self.service_id != "odin"
+                || self.signer_identity_id
+                    != derive_service_identity_id::<OdinTopologyIdentity>(&self.signer_public_key)?)
+        {
+            bail!("Odin topology correlation trust anchor profile is invalid");
         }
         Ok(())
     }

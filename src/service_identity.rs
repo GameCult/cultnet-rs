@@ -33,6 +33,29 @@ pub trait ServiceSignaturePurpose<P: ServiceIdentityProfile>: Send + Sync + 'sta
 
 pub enum IdunnServiceIdentity {}
 
+/// Odin-owned identity dedicated to signed Expected/Present/Ready topology
+/// correlation. It is not a provider-health key and cannot issue Idunn
+/// admission or lifecycle authority.
+pub enum OdinTopologyIdentity {}
+
+pub struct OdinRuntimeTopologyCorrelationPurpose;
+
+impl ServiceSignaturePurpose<OdinTopologyIdentity> for OdinRuntimeTopologyCorrelationPurpose {
+    const PURPOSE: &'static [u8] = b"odin.runtime_topology_correlation.v1";
+}
+
+impl ServiceIdentityProfile for OdinTopologyIdentity {
+    const PRIVATE_TYPE: &'static str = "odin.topology_identity.private.v1";
+    const PRIVATE_SCHEMA: &'static str = "odin.topology_identity.private.v1";
+    const PRIVATE_KEY: &'static str = "odin-topology-identity";
+    const TRUST_ANCHOR_TYPE: &'static str = "odin.topology_identity.trust_anchor.v1";
+    const TRUST_ANCHOR_SCHEMA: &'static str = "odin.topology_identity.trust_anchor.v1";
+    const TRUST_ANCHOR_KEY: &'static str = "odin-topology-identity-public";
+    const ID_DOMAIN: &'static [u8] = b"odin.topology-identity.id.v1\0";
+    const SIGNATURE_DOMAIN: &'static [u8] = b"odin.topology-identity.signature.v1\0";
+    const PROTECTOR_CONTEXT: &'static str = "odin-topology-identity-v1";
+}
+
 /// Root-operated identity dedicated to deployment-brake release grants. The
 /// Idunn daemon receives only this profile's public trust anchor; opening the
 /// private store is a provisioning operation, never daemon startup work.

@@ -388,6 +388,20 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             Some("idunn.process_write_lease.v1"),
             Some("idunn.process_write_lease"),
         )?,
+        schema_registration(
+            include_str!("../contracts/idunn.expected-incarnation.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("idunn.expected_incarnation.v1"),
+            Some("idunn.expected_incarnation"),
+        )?,
+        schema_registration(
+            include_str!("../contracts/odin.runtime-topology-correlation.schema.json"),
+            CultNetSchemaKind::DocumentPayload,
+            vec![CultNetWireContract::CultNetSchemaV0],
+            Some("odin.runtime_topology_correlation.v1"),
+            Some("odin.runtime_topology_correlation"),
+        )?,
     ] {
         registry.register(registration)?;
     }

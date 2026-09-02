@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/odin.runtime-topology-correlation.schema.json",
+  "title": "Odin runtime topology correlation",
+  "description": "Odin-signed canonical positional receipt correlating one exact Idunn Expected projection with current activation, provider-signed presence, dependency evidence, and explicit disagreements. Dependency and disagreement ordering are enforced by the typed contract.",
+  "type": "array",
+  "prefixItems": [
+    { "const": "odin.runtime_topology_correlation.v1" },
+    { "$ref": "#/$defs/identifier" },
+    { "$ref": "#/$defs/sha256" },
+    { "const": true },
+    { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    { "$ref": "#/$defs/identifier" },
+    { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    { "type": "boolean" },
+    { "type": "boolean" },
+    {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dependencyEvidence" },
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    {
+      "type": "array",
+      "items": { "$ref": "#/$defs/disagreement" },
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    { "$ref": "#/$defs/identifier" },
+    { "type": "integer", "minimum": 1 },
+    { "type": "integer", "minimum": 1 },
+    { "const": "ed25519" },
+    {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 64,
+      "maxItems": 64
+    }
+  ],
+  "minItems": 17,
+  "maxItems": 17,
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "prefixItems": [true, true, true, true, { "type": "null" }, { "type": "null" }, true, { "type": "null" }]
+        },
+        {
+          "prefixItems": [true, true, true, true, { "$ref": "#/$defs/sha256" }, true, true, { "$ref": "#/$defs/sha256" }]
+        },
+        {
+          "prefixItems": [true, true, true, true, { "type": "null" }, { "$ref": "#/$defs/sha256" }, true, { "$ref": "#/$defs/sha256" }]
+        }
+      ]
+    },
+    {
+      "if": {
+        "prefixItems": [true, true, true, true, true, true, true, true, { "const": true }]
+      },
+      "then": {
+        "prefixItems": [true, true, true, true, { "$ref": "#/$defs/sha256" }, { "$ref": "#/$defs/sha256" }, true, { "$ref": "#/$defs/sha256" }]
+      }
+    },
+    {
+      "if": {
+        "prefixItems": [true, true, true, true, true, true, true, true, true, { "const": true }]
+      },
+      "then": {
+        "prefixItems": [true, true, true, true, true, true, true, true, { "const": true }, true, true, { "maxItems": 0 }]
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "detail": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256-[0-9a-f]{64}$"
+    },
+    "dependencyEvidence": {
+      "type": "array",
+      "prefixItems": [
+        { "enum": ["bootstrap", "required", "optional", "shared-infrastructure", "private", "external-operator-binding"] },
+        { "$ref": "#/$defs/identifier" },
+        { "$ref": "#/$defs/identifier" },
+        { "$ref": "#/$defs/identifier" },
+        { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+        { "oneOf": [{ "enum": ["managed-incarnation", "external-operator-binding"] }, { "type": "null" }] },
+        { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        { "oneOf": [{ "$ref": "#/$defs/endpoint" }, { "type": "null" }] },
+        { "oneOf": [{ "type": "integer", "minimum": 1, "maximum": 4294967295 }, { "type": "null" }] },
+        { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        { "type": "boolean" }
+      ],
+      "minItems": 11,
+      "maxItems": 11
+    },
+    "disagreement": {
+      "type": "array",
+      "prefixItems": [
+        { "$ref": "#/$defs/identifier" },
+        { "oneOf": [{ "$ref": "#/$defs/detail" }, { "type": "null" }] },
+        { "oneOf": [{ "$ref": "#/$defs/detail" }, { "type": "null" }] }
+      ],
+      "minItems": 3,
+      "maxItems": 3,
+      "not": {
+        "prefixItems": [true, { "type": "null" }, { "type": "null" }]
+      }
+    }
+  }
+}

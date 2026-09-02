@@ -352,6 +352,16 @@ fn builtin_schema_registry_exposes_runtime_authority_document_payloads() -> Resu
             "idunn.process_write_lease.v1",
             "idunn.process_write_lease",
         ),
+        (
+            "https://github.com/GameCult/cultnet-rs/contracts/idunn.expected-incarnation.schema.json",
+            "idunn.expected_incarnation.v1",
+            "idunn.expected_incarnation",
+        ),
+        (
+            "https://github.com/GameCult/cultnet-rs/contracts/odin.runtime-topology-correlation.schema.json",
+            "odin.runtime_topology_correlation.v1",
+            "odin.runtime_topology_correlation",
+        ),
     ] {
         let descriptor = registry
             .get(schema_id, true)
