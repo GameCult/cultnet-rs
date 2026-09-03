@@ -27,6 +27,12 @@ not expose a pile of bespoke verbs and hope everyone remembers the ritual; it
 advertises typed documents, typed intents, and typed receipts. Polite machines
 knock on the contract before touching the furniture.
 
+For non-expiring reliable RUDP channels, `send_reliable` returns a
+`CultNetRudpReliableSendReceipt`. Poll `receive_once` and `poll_resends`, then
+inspect `reliable_send_status`; only acknowledgement of every transport packet
+in that exact frame yields `Acknowledged`. A peer reset yields `Invalidated`.
+Socket byte counts and unrelated inbound traffic are not delivery receipts.
+
 ## Receipts
 
 ```powershell

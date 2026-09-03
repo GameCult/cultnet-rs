@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::Path;
+#[cfg(windows)]
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 pub const WINDOWS_SERVICE_IDENTITY_ASSURANCE: &str = "os_user_installation_bound_best_effort";
 pub const LINUX_SERVICE_IDENTITY_ASSURANCE: &str = "os_installation_file_bound_cloneable_baseline";
@@ -227,9 +230,9 @@ pub fn enroll_service_identity_at<P: ServiceIdentityProfile>(
         );
     }
     prepare_parent(path)?;
-    let mut seed = [0u8; 32];
-    rand::rng().fill_bytes(&mut seed);
-    let signing_key = SigningKey::from_bytes(&seed);
+    let mut seed = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(seed.as_mut());
+    let signing_key = SigningKey::from_bytes(&*seed);
     let mut nonce = [0u8; 32];
     rand::rng().fill_bytes(&mut nonce);
     let public_key = signing_key.verifying_key().to_bytes();
@@ -238,7 +241,7 @@ pub fn enroll_service_identity_at<P: ServiceIdentityProfile>(
         schema_version: P::PRIVATE_SCHEMA.into(),
         identity_id: identity_id::<P>(&public_key),
         public_key: public_key.to_vec(),
-        protected_private_seed: protect_seed::<P>(&seed, &binding)?,
+        protected_private_seed: protect_seed::<P>(&*seed, &binding)?,
         protector_kind: platform_protector_kind().into(),
         protector_binding: binding,
         protector_version: "v1".into(),
@@ -271,7 +274,7 @@ pub fn open_service_identity_at<P: ServiceIdentityProfile>(
 pub fn open_service_identity_credential_reader<P: ServiceIdentityProfile>(
     mut reader: impl Read,
 ) -> Result<ServiceIdentitySigner<P>> {
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::new());
     reader
         .read_to_end(&mut bytes)
         .context("failed to read immutable service identity credential")?;
@@ -314,10 +317,12 @@ fn open_service_identity_envelopes<P: ServiceIdentityProfile>(
     if entry.protector_binding != binding {
         bail!("service identity protector binding does not match this OS installation or profile");
     }
-    let seed: [u8; 32] = unprotect_seed::<P>(&entry.protected_private_seed, &binding)?
+    let seed = unprotect_seed::<P>(&entry.protected_private_seed, &binding)?;
+    let seed: &[u8; 32] = seed
+        .as_slice()
         .try_into()
         .map_err(|_| anyhow!("unprotected service identity seed has invalid length"))?;
-    let signing_key = SigningKey::from_bytes(&seed);
+    let signing_key = SigningKey::from_bytes(seed);
     if signing_key.verifying_key().to_bytes().as_slice() != entry.public_key.as_slice() {
         bail!("service identity private seed does not match enrolled public key");
     }
@@ -549,28 +554,37 @@ fn platform_binding<P: ServiceIdentityProfile>() -> Result<String> {
 
 #[cfg(windows)]
 fn protect_seed<P: ServiceIdentityProfile>(seed: &[u8; 32], binding: &str) -> Result<Vec<u8>> {
-    dpapi::<P>(seed, binding, true)
+    Ok(dpapi::<P>(seed, binding, true)?.to_vec())
 }
 #[cfg(windows)]
-fn unprotect_seed<P: ServiceIdentityProfile>(seed: &[u8], binding: &str) -> Result<Vec<u8>> {
+fn unprotect_seed<P: ServiceIdentityProfile>(
+    seed: &[u8],
+    binding: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
     dpapi::<P>(seed, binding, false)
 }
 #[cfg(windows)]
-fn dpapi<P: ServiceIdentityProfile>(input: &[u8], binding: &str, protect: bool) -> Result<Vec<u8>> {
+fn dpapi<P: ServiceIdentityProfile>(
+    input: &[u8],
+    binding: &str,
+    protect: bool,
+) -> Result<Zeroizing<Vec<u8>>> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
     };
-    let mut input = input.to_vec();
-    let mut entropy = Sha256::digest(
-        [
-            b"gamecult-service-identity-dpapi-v1\0".as_slice(),
-            P::PROTECTOR_CONTEXT.as_bytes(),
-            binding.as_bytes(),
-        ]
-        .concat(),
-    )
-    .to_vec();
+    let mut input = Zeroizing::new(input.to_vec());
+    let mut entropy = Zeroizing::new(
+        Sha256::digest(
+            [
+                b"gamecult-service-identity-dpapi-v1\0".as_slice(),
+                P::PROTECTOR_CONTEXT.as_bytes(),
+                binding.as_bytes(),
+            ]
+            .concat(),
+        )
+        .to_vec(),
+    );
     let ib = CRYPT_INTEGER_BLOB {
         cbData: input.len() as u32,
         pbData: input.as_mut_ptr(),
@@ -610,10 +624,14 @@ fn dpapi<P: ServiceIdentityProfile>(input: &[u8], binding: &str, protect: bool) 
         return Err(std::io::Error::last_os_error())
             .context("DPAPI service identity operation failed");
     }
-    let bytes =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    if output.pbData.is_null() {
+        bail!("DPAPI service identity operation returned a null output");
+    }
+    let output = unsafe { std::slice::from_raw_parts_mut(output.pbData, output.cbData as usize) };
+    let bytes = Zeroizing::new(output.to_vec());
+    output.zeroize();
     unsafe {
-        LocalFree(output.pbData.cast());
+        LocalFree(output.as_mut_ptr().cast());
     }
     Ok(bytes)
 }
@@ -623,11 +641,24 @@ fn protect_seed<P: ServiceIdentityProfile>(seed: &[u8; 32], binding: &str) -> Re
     xor_linux::<P>(seed, binding)
 }
 #[cfg(target_os = "linux")]
-fn unprotect_seed<P: ServiceIdentityProfile>(seed: &[u8], binding: &str) -> Result<Vec<u8>> {
+fn unprotect_seed<P: ServiceIdentityProfile>(
+    seed: &[u8],
+    binding: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
     if seed.len() != 32 {
         bail!("protected Linux service seed has invalid length");
     }
-    xor_linux::<P>(seed, binding)
+    let mask = Sha256::digest(
+        [
+            b"gamecult-linux-service-seed-v1\0".as_slice(),
+            P::PROTECTOR_CONTEXT.as_bytes(),
+            binding.as_bytes(),
+        ]
+        .concat(),
+    );
+    let mut clear_seed = Zeroizing::new(Vec::with_capacity(seed.len()));
+    clear_seed.extend(seed.iter().zip(mask).map(|(a, b)| a ^ b));
+    Ok(clear_seed)
 }
 #[cfg(target_os = "linux")]
 fn xor_linux<P: ServiceIdentityProfile>(seed: &[u8], binding: &str) -> Result<Vec<u8>> {
@@ -747,6 +778,18 @@ mod tests {
         let mut trailing = bytes.clone();
         trailing.push(0xc0);
         assert!(open_service_identity_credential_bytes::<IdunnServiceIdentity>(&trailing).is_err());
+
+        let mut wrong_seed_envelopes = envelopes.clone();
+        let mut wrong_seed: ServiceIdentityPrivateEntry =
+            rmp_serde::from_slice(&wrong_seed_envelopes[0].payload)?;
+        wrong_seed.protected_private_seed[0] ^= 1;
+        wrong_seed_envelopes[0].payload = rmp_serde::to_vec(&wrong_seed)?;
+        assert!(
+            open_service_identity_credential_bytes::<IdunnServiceIdentity>(&rmp_serde::to_vec(
+                &wrong_seed_envelopes
+            )?)
+            .is_err()
+        );
 
         let mut entry: ServiceIdentityPrivateEntry = rmp_serde::from_slice(&envelopes[0].payload)?;
         entry.protector_binding.push_str(":another-machine");

@@ -39,6 +39,40 @@ fn receive_rudp_frame(
     anyhow::bail!("RUDP socket frame was not delivered")
 }
 
+fn receive_raw_rudp_packet(socket: &UdpSocket) -> Result<CultNetRudpPacket> {
+    let mut wire = vec![0_u8; 65_535];
+    let (received, _) = socket.recv_from(&mut wire)?;
+    wire.truncate(received);
+    decode_rudp_packet(&wire)
+}
+
+fn send_raw_rudp_packet(
+    socket: &UdpSocket,
+    destination: std::net::SocketAddr,
+    packet: &CultNetRudpPacket,
+) -> Result<()> {
+    socket.send_to(&encode_rudp_packet(packet)?, destination)?;
+    Ok(())
+}
+
+fn rudp_ack_packet(connection_id: u32, sequence: u32, ack: u32) -> CultNetRudpPacket {
+    CultNetRudpPacket {
+        packet_type: CultNetRudpPacketType::Ack,
+        connection_id,
+        sequence,
+        ack,
+        ack_mask: 0,
+        channel_id: "control".to_string(),
+        reliable: false,
+        ordered: false,
+        sequenced: false,
+        fragment_id: 0,
+        fragment_index: 0,
+        fragment_count: 0,
+        payload: Vec::new(),
+    }
+}
+
 #[test]
 fn tcp_framed_transport_carries_schema_payloads_with_stats() -> Result<()> {
     let payload = b"cultnet-payload".to_vec();
@@ -779,15 +813,29 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
     assert!(client.connected());
     assert!(server.connected());
 
-    client.send("schema", b"client-state".to_vec())?;
+    let client_send = client.send_reliable("schema", b"client-state".to_vec())?;
+    assert_eq!(
+        client.reliable_send_status(&client_send),
+        CultNetRudpReliableSendStatus::Pending
+    );
     let server_frame = receive_rudp_frame(&mut server)?;
     assert_eq!(server_frame.channel_id, "schema");
     assert_eq!(server_frame.payload, b"client-state");
+    let _ = client.receive_once()?;
+    assert_eq!(
+        client.reliable_send_status(&client_send),
+        CultNetRudpReliableSendStatus::Acknowledged
+    );
 
-    server.send("schema", b"server-state".to_vec())?;
+    let server_send = server.send_reliable("schema", b"server-state".to_vec())?;
     let client_frame = receive_rudp_frame(&mut client)?;
     assert_eq!(client_frame.channel_id, "schema");
     assert_eq!(client_frame.payload, b"server-state");
+    let _ = server.receive_once()?;
+    assert_eq!(
+        server.reliable_send_status(&server_send),
+        CultNetRudpReliableSendStatus::Acknowledged
+    );
     assert_eq!(
         server.profile.transports[0].protocol,
         CultNetTransportProtocol::Rudp
@@ -795,6 +843,183 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
     assert_eq!(client.stats().frames_sent, 1);
     assert_eq!(server.stats().frames_received, 1);
 
+    Ok(())
+}
+
+#[test]
+fn rudp_reliable_receipt_ignores_malformed_unrelated_and_wrong_peer_traffic() -> Result<()> {
+    let peer = bind_udp_socket()?;
+    let attacker = bind_udp_socket()?;
+    let client_socket = bind_udp_socket()?;
+    let client_addr = client_socket.local_addr()?;
+    let connection_id = 0x1020_3050;
+    let mut options = CultNetRudpSocketTransportOptions::client(
+        "receipt-client",
+        client_socket,
+        peer.local_addr()?,
+        connection_id,
+    );
+    options.initial_sequence = 10;
+    options.max_fragment_bytes = Some(4);
+    let mut client = CultNetRudpSocketTransportConnection::new(options)?;
+    client.assume_connected();
+
+    let receipt = client.send_reliable("schema", b"eightbit".to_vec())?;
+    assert_eq!(receipt.packet_sequences(), &[10, 11]);
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+    assert!(client.send_reliable("latest", Vec::new()).is_err());
+    assert!(client.send_reliable("media", Vec::new()).is_err());
+    let first = receive_raw_rudp_packet(&peer)?;
+    let second = receive_raw_rudp_packet(&peer)?;
+    assert_eq!([first.sequence, second.sequence], [10, 11]);
+
+    peer.send_to(b"not-rudp", client_addr)?;
+    assert!(client.receive_once()?.is_none());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send_raw_rudp_packet(
+        &attacker,
+        client_addr,
+        &rudp_ack_packet(connection_id, 700, 10),
+    )?;
+    assert!(client.receive_once()?.is_none());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send_raw_rudp_packet(
+        &peer,
+        client_addr,
+        &rudp_ack_packet(connection_id, 701, 999),
+    )?;
+    assert!(client.receive_once()?.is_none());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send_raw_rudp_packet(
+        &peer,
+        client_addr,
+        &rudp_ack_packet(connection_id + 1, 702, 10),
+    )?;
+    assert!(client.receive_once().is_err());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send_raw_rudp_packet(&peer, client_addr, &rudp_ack_packet(connection_id, 703, 10))?;
+    assert!(client.receive_once()?.is_none());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send_raw_rudp_packet(&peer, client_addr, &rudp_ack_packet(connection_id, 704, 11))?;
+    assert!(client.receive_once()?.is_none());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Acknowledged
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_reliable_receipt_stays_pending_through_retry_then_observes_ack() -> Result<()> {
+    let peer = bind_udp_socket()?;
+    let client_socket = bind_udp_socket()?;
+    let client_addr = client_socket.local_addr()?;
+    let connection_id = 0x1020_3051;
+    let mut options = CultNetRudpSocketTransportOptions::client(
+        "receipt-retry-client",
+        client_socket,
+        peer.local_addr()?,
+        connection_id,
+    );
+    options.initial_sequence = 20;
+    options.resend_delay_ms = 5;
+    let mut client = CultNetRudpSocketTransportConnection::new(options)?;
+    client.assume_connected();
+
+    let receipt = client.send_reliable("schema", b"retry-me".to_vec())?;
+    let original = receive_raw_rudp_packet(&peer)?;
+    assert_eq!(original.sequence, 20);
+
+    thread::sleep(StdDuration::from_millis(10));
+    client.poll_resends()?;
+    let retry = receive_raw_rudp_packet(&peer)?;
+    assert_eq!(retry.sequence, original.sequence);
+    assert_eq!(retry.payload, original.payload);
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send_raw_rudp_packet(
+        &peer,
+        client_addr,
+        &rudp_ack_packet(connection_id, 800, original.sequence),
+    )?;
+    assert!(client.receive_once()?.is_none());
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Acknowledged
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_reliable_receipt_is_invalidated_by_peer_reset() -> Result<()> {
+    let server_socket = bind_udp_socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let peer = bind_udp_socket()?;
+    let connection_id = 0x1020_3052;
+    let mut options = CultNetRudpSocketTransportOptions::server(
+        "receipt-reset-server",
+        server_socket,
+        connection_id,
+    );
+    options.remote_addr = Some(peer.local_addr()?);
+    options.initial_sequence = 30;
+    let mut server = CultNetRudpSocketTransportConnection::new(options)?;
+    server.assume_connected();
+
+    let receipt = server.send_reliable("schema", b"old-peer".to_vec())?;
+    let _ = receive_raw_rudp_packet(&peer)?;
+    assert_eq!(
+        server.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    let connect = CultNetRudpPacket {
+        packet_type: CultNetRudpPacketType::Connect,
+        connection_id,
+        sequence: 1,
+        ack: 0,
+        ack_mask: 0,
+        channel_id: "control".to_string(),
+        reliable: true,
+        ordered: true,
+        sequenced: false,
+        fragment_id: 0,
+        fragment_index: 0,
+        fragment_count: 0,
+        payload: Vec::new(),
+    };
+    send_raw_rudp_packet(&peer, server_addr, &connect)?;
+    assert!(server.receive_once()?.is_none());
+    assert_eq!(
+        server.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Invalidated
+    );
     Ok(())
 }
 

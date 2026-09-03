@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use uuid::Uuid;
 
 use crate::CultNetTransportChannel;
 use crate::CultNetTransportDelivery;
@@ -98,6 +99,28 @@ pub struct CultNetRudpSendOptions {
     pub reliable_expire_after_ms: Option<u64>,
 }
 
+/// Identifies every transport packet belonging to one non-expiring reliable
+/// send. Receipts are local to the session that issued them and cannot survive
+/// a peer reset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CultNetRudpReliableSendReceipt {
+    session_scope: Uuid,
+    sequences: Vec<u32>,
+}
+
+impl CultNetRudpReliableSendReceipt {
+    pub fn packet_sequences(&self) -> &[u32] {
+        &self.sequences
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CultNetRudpReliableSendStatus {
+    Pending,
+    Acknowledged,
+    Invalidated,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingReliablePacket {
     packet: CultNetRudpPacket,
@@ -121,6 +144,7 @@ struct FragmentBuffer {
 }
 
 pub struct CultNetRudpSession {
+    session_scope: Uuid,
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
@@ -141,6 +165,7 @@ pub struct CultNetRudpSession {
 impl CultNetRudpSession {
     pub fn new(options: CultNetRudpSessionOptions) -> Self {
         Self {
+            session_scope: Uuid::new_v4(),
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
@@ -172,6 +197,7 @@ impl CultNetRudpSession {
     }
 
     pub fn reset_peer_state(&mut self) {
+        self.session_scope = Uuid::new_v4();
         self.connected = false;
         self.last_received_at_ms = None;
         self.highest_received_sequence = None;
@@ -190,6 +216,39 @@ impl CultNetRudpSession {
 
     pub fn pending_reliable_sequences(&self) -> Vec<u32> {
         self.pending_reliable.keys().copied().collect()
+    }
+
+    fn reliable_send_status(
+        &self,
+        receipt: &CultNetRudpReliableSendReceipt,
+    ) -> CultNetRudpReliableSendStatus {
+        if receipt.session_scope != self.session_scope {
+            return CultNetRudpReliableSendStatus::Invalidated;
+        }
+        if receipt
+            .sequences
+            .iter()
+            .any(|sequence| self.pending_reliable.contains_key(sequence))
+        {
+            CultNetRudpReliableSendStatus::Pending
+        } else {
+            CultNetRudpReliableSendStatus::Acknowledged
+        }
+    }
+
+    fn non_expiring_reliable_receipt(
+        &self,
+        packets: &[CultNetRudpPacket],
+    ) -> Result<CultNetRudpReliableSendReceipt> {
+        if packets.is_empty() || packets.iter().any(|packet| !packet.reliable) {
+            return Err(anyhow!(
+                "RUDP acknowledgement receipts require a non-empty reliable packet set"
+            ));
+        }
+        Ok(CultNetRudpReliableSendReceipt {
+            session_scope: self.session_scope,
+            sequences: packets.iter().map(|packet| packet.sequence).collect(),
+        })
     }
 
     pub fn last_received_at_ms(&self) -> Option<u64> {
@@ -989,6 +1048,41 @@ impl CultNetRudpSocketTransportConnection {
         let packets =
             self.session
                 .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
+        self.send_data_packets(&packets)?;
+        self.stats.frames_sent += 1;
+        Ok(())
+    }
+
+    /// Sends one frame on a reliable channel whose packets cannot expire and
+    /// returns the transport receipt used to observe its exact acknowledgement.
+    pub fn send_reliable(
+        &mut self,
+        channel_id: &str,
+        payload: Vec<u8>,
+    ) -> Result<CultNetRudpReliableSendReceipt> {
+        let options = self.channel_send_options(channel_id, now_ms());
+        if !options.reliable || options.reliable_expire_after_ms.is_some() {
+            return Err(anyhow!(
+                "RUDP acknowledgement receipts require a non-expiring reliable channel"
+            ));
+        }
+        let packets =
+            self.session
+                .send_many(channel_id, payload, options, self.max_fragment_bytes)?;
+        self.send_data_packets(&packets)?;
+        let receipt = self.session.non_expiring_reliable_receipt(&packets)?;
+        self.stats.frames_sent += 1;
+        Ok(receipt)
+    }
+
+    pub fn reliable_send_status(
+        &self,
+        receipt: &CultNetRudpReliableSendReceipt,
+    ) -> CultNetRudpReliableSendStatus {
+        self.session.reliable_send_status(receipt)
+    }
+
+    fn send_data_packets(&mut self, packets: &[CultNetRudpPacket]) -> Result<()> {
         let fragmented = packets.len() > 1;
         for (index, packet) in packets.iter().enumerate() {
             self.send_packet(packet)?;
@@ -996,7 +1090,6 @@ impl CultNetRudpSocketTransportConnection {
                 thread::sleep(Duration::from_millis(1));
             }
         }
-        self.stats.frames_sent += 1;
         Ok(())
     }
 
