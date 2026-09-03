@@ -246,6 +246,13 @@ impl IdunnExpectedRoute {
                     bail!("TCP route endpoints use an unsupported scheme");
                 }
             }
+            "rudp" => {
+                if !self.stable_endpoint.starts_with("rudp://")
+                    || !self.candidate_endpoint.starts_with("rudp://")
+                {
+                    bail!("RUDP route endpoints use an unsupported scheme");
+                }
+            }
             _ => bail!("route transport is unsupported"),
         }
         Ok(())
@@ -2963,6 +2970,24 @@ mod tests {
         let mut value = expected_incarnation();
         let stable_endpoint = value.route.as_ref().unwrap().stable_endpoint.clone();
         value.route.as_mut().unwrap().candidate_endpoint = stable_endpoint;
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn expected_route_keeps_rudp_distinct_and_scheme_exact() {
+        let mut value = expected_incarnation();
+        value.route = Some(IdunnExpectedRoute {
+            route_id: "odin-rendezvous".into(),
+            transport: "rudp".into(),
+            stable_endpoint: "rudp://10.77.0.1:17871".into(),
+            candidate_endpoint: "rudp://127.0.0.1:24171".into(),
+        });
+        assert!(value.validate().is_ok());
+
+        value.route.as_mut().unwrap().candidate_endpoint = "tcp://127.0.0.1:24171".into();
+        assert!(value.validate().is_err());
+
+        value.route.as_mut().unwrap().candidate_endpoint = "udp://127.0.0.1:24171".into();
         assert!(value.validate().is_err());
     }
 

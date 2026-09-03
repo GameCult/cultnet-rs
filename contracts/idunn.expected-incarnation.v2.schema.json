@@ -102,7 +102,7 @@
       "type": "array",
       "prefixItems": [
         { "$ref": "#/$defs/identifier" },
-        { "enum": ["http", "tcp"] },
+        { "enum": ["http", "tcp", "rudp"] },
         { "$ref": "#/$defs/endpoint" },
         { "$ref": "#/$defs/endpoint" }
       ],
