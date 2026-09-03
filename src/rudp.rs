@@ -25,6 +25,13 @@ const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
 const RUDP_FIXED_HEADER_BYTES: usize = 36;
 const DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
+const RUDP_RECEIVE_WINDOW_PACKETS: u32 = 1024;
+const RUDP_MAX_TRACKED_CHANNELS: usize = 64;
+const RUDP_MAX_INCOMPLETE_FRAGMENT_SETS: usize = 64;
+const RUDP_MAX_FRAGMENTS_PER_FRAME: u16 = 1024;
+const RUDP_MAX_REASSEMBLY_BYTES: usize = 4 * 1024 * 1024;
+const RUDP_MAX_ORDERED_BUFFERED_FRAMES: usize = 1024;
+const RUDP_MAX_ORDERED_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CultNetRudpPacketType {
@@ -157,7 +164,10 @@ pub struct CultNetRudpSession {
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
     ordered_next_sequence_by_channel: BTreeMap<String, u32>,
     ordered_buffers: BTreeMap<String, BTreeMap<u32, PendingOrderedFrame>>,
+    ordered_buffered_frames: usize,
+    ordered_buffered_bytes: usize,
     fragment_buffers: BTreeMap<(String, u16), FragmentBuffer>,
+    fragment_buffered_bytes: usize,
     highest_delivered_sequenced_by_channel: BTreeMap<String, u32>,
     reliable_packets_expired: u64,
 }
@@ -178,7 +188,10 @@ impl CultNetRudpSession {
             pending_reliable: BTreeMap::new(),
             ordered_next_sequence_by_channel: BTreeMap::new(),
             ordered_buffers: BTreeMap::new(),
+            ordered_buffered_frames: 0,
+            ordered_buffered_bytes: 0,
             fragment_buffers: BTreeMap::new(),
+            fragment_buffered_bytes: 0,
             highest_delivered_sequenced_by_channel: BTreeMap::new(),
             reliable_packets_expired: 0,
         }
@@ -205,7 +218,10 @@ impl CultNetRudpSession {
         self.pending_reliable.clear();
         self.ordered_next_sequence_by_channel.clear();
         self.ordered_buffers.clear();
+        self.ordered_buffered_frames = 0;
+        self.ordered_buffered_bytes = 0;
         self.fragment_buffers.clear();
+        self.fragment_buffered_bytes = 0;
         self.highest_delivered_sequenced_by_channel.clear();
     }
 
@@ -489,6 +505,17 @@ impl CultNetRudpSession {
             });
         }
 
+        if self.received_sequence_is_stale(packet.sequence) {
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
+                disconnected: false,
+                disconnect_reason: Vec::new(),
+            });
+        }
+
         let duplicate = self.received_sequences.contains(&packet.sequence);
         self.remember_received(packet.sequence);
         if duplicate {
@@ -513,6 +540,13 @@ impl CultNetRudpSession {
             });
         };
         if packet.sequenced && !ordered {
+            if !self
+                .highest_delivered_sequenced_by_channel
+                .contains_key(&frame.channel_id)
+                && self.highest_delivered_sequenced_by_channel.len() >= RUDP_MAX_TRACKED_CHANNELS
+            {
+                return Err(anyhow!("RUDP session has too many sequenced channels"));
+            }
             let highest = self
                 .highest_delivered_sequenced_by_channel
                 .entry(frame.channel_id.clone())
@@ -530,7 +564,7 @@ impl CultNetRudpSession {
             *highest = frame.sequence;
         }
         let delivered = if ordered {
-            self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
+            self.deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)?
         } else {
             vec![frame]
         };
@@ -716,6 +750,16 @@ impl CultNetRudpSession {
         {
             self.highest_received_sequence = Some(sequence);
         }
+        if let Some(highest) = self.highest_received_sequence {
+            let first_retained = highest.saturating_sub(RUDP_RECEIVE_WINDOW_PACKETS);
+            self.received_sequences
+                .retain(|received| *received >= first_retained);
+        }
+    }
+
+    fn received_sequence_is_stale(&self, sequence: u32) -> bool {
+        self.highest_received_sequence
+            .is_some_and(|highest| sequence < highest.saturating_sub(RUDP_RECEIVE_WINDOW_PACKETS))
     }
 
     fn ack_state(&self) -> (u32, u32) {
@@ -754,8 +798,38 @@ impl CultNetRudpSession {
                 "RUDP fragment index must be lower than fragment count"
             ));
         }
+        if packet.fragment_count > RUDP_MAX_FRAGMENTS_PER_FRAME {
+            return Err(anyhow!(
+                "RUDP fragment count exceeds the per-frame receive bound"
+            ));
+        }
 
         let key = (packet.channel_id.clone(), packet.fragment_id);
+        if !self.fragment_buffers.contains_key(&key)
+            && self.fragment_buffers.len() >= RUDP_MAX_INCOMPLETE_FRAGMENT_SETS
+        {
+            return Err(anyhow!(
+                "RUDP session has too many incomplete fragment sets"
+            ));
+        }
+        if self
+            .fragment_buffers
+            .get(&key)
+            .is_some_and(|buffer| buffer.payloads.contains_key(&packet.fragment_index))
+        {
+            return Err(anyhow!(
+                "RUDP fragment index was reused with a new sequence"
+            ));
+        }
+        if self
+            .fragment_buffered_bytes
+            .saturating_add(packet.payload.len())
+            > RUDP_MAX_REASSEMBLY_BYTES
+        {
+            return Err(anyhow!(
+                "RUDP incomplete fragment bytes exceed the session receive bound"
+            ));
+        }
         let buffer = self
             .fragment_buffers
             .entry(key.clone())
@@ -777,11 +851,13 @@ impl CultNetRudpSession {
         buffer
             .sequences
             .insert(packet.fragment_index, packet.sequence);
+        self.fragment_buffered_bytes += packet.payload.len();
         if buffer.payloads.len() < packet.fragment_count as usize {
             return Ok(None);
         }
 
-        let mut payload = Vec::new();
+        let frame_bytes = buffer.payloads.values().map(Vec::len).sum::<usize>();
+        let mut payload = Vec::with_capacity(frame_bytes);
         let mut sequences = Vec::new();
         for index in 0..packet.fragment_count {
             let Some(chunk) = buffer.payloads.get(&index) else {
@@ -796,6 +872,7 @@ impl CultNetRudpSession {
         let channel_id = buffer.channel_id.clone();
         let ordered = buffer.ordered;
         self.fragment_buffers.remove(&key);
+        self.fragment_buffered_bytes = self.fragment_buffered_bytes.saturating_sub(frame_bytes);
         Ok(Some((
             CultNetRudpDeliveredFrame {
                 channel_id,
@@ -812,7 +889,7 @@ impl CultNetRudpSession {
         frame: CultNetRudpDeliveredFrame,
         next_sequence_after_frame: u32,
         expected_sequence_if_uninitialized: u32,
-    ) -> Vec<CultNetRudpDeliveredFrame> {
+    ) -> Result<Vec<CultNetRudpDeliveredFrame>> {
         let channel_id = frame.channel_id.clone();
         let next = if let Some(next) = self
             .ordered_next_sequence_by_channel
@@ -821,6 +898,9 @@ impl CultNetRudpSession {
         {
             next
         } else {
+            if self.ordered_next_sequence_by_channel.len() >= RUDP_MAX_TRACKED_CHANNELS {
+                return Err(anyhow!("RUDP session has too many ordered channels"));
+            }
             self.ordered_next_sequence_by_channel.insert(
                 channel_id.clone(),
                 expected_sequence_if_uninitialized.min(frame.sequence),
@@ -829,10 +909,19 @@ impl CultNetRudpSession {
         };
 
         if frame.sequence < next {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         if frame.sequence > next {
+            if self.ordered_buffered_frames >= RUDP_MAX_ORDERED_BUFFERED_FRAMES
+                || self
+                    .ordered_buffered_bytes
+                    .saturating_add(frame.payload.len())
+                    > RUDP_MAX_ORDERED_BUFFERED_BYTES
+            {
+                return Err(anyhow!("RUDP ordered receive buffer is full"));
+            }
+            let frame_bytes = frame.payload.len();
             self.ordered_buffers.entry(channel_id).or_default().insert(
                 frame.sequence,
                 PendingOrderedFrame {
@@ -840,14 +929,16 @@ impl CultNetRudpSession {
                     next_sequence: next_sequence_after_frame,
                 },
             );
-            return Vec::new();
+            self.ordered_buffered_frames += 1;
+            self.ordered_buffered_bytes += frame_bytes;
+            return Ok(Vec::new());
         }
 
         self.ordered_next_sequence_by_channel
             .insert(channel_id.clone(), next_sequence_after_frame);
         let mut delivered = vec![frame];
         delivered.extend(self.drain_ordered(&channel_id));
-        delivered
+        Ok(delivered)
     }
 
     fn drain_ordered(&mut self, channel_id: &str) -> Vec<CultNetRudpDeliveredFrame> {
@@ -866,6 +957,10 @@ impl CultNetRudpSession {
             let Some(pending) = buffer.remove(&next) else {
                 break;
             };
+            self.ordered_buffered_frames = self.ordered_buffered_frames.saturating_sub(1);
+            self.ordered_buffered_bytes = self
+                .ordered_buffered_bytes
+                .saturating_sub(pending.frame.payload.len());
             delivered.push(pending.frame);
             self.ordered_next_sequence_by_channel
                 .insert(channel_id.to_string(), pending.next_sequence);
@@ -1535,5 +1630,81 @@ mod tests {
         assert_eq!(delivered_second.len(), 1);
         assert_eq!(delivered_second[0].payload, b"second");
         assert!(delivered_first.is_empty());
+    }
+
+    #[test]
+    fn receive_history_is_limited_to_the_protocol_window() {
+        let mut sender = connected_session(1);
+        let mut receiver = connected_session(1);
+        for now in 1..=(RUDP_RECEIVE_WINDOW_PACKETS * 2) {
+            let packet = sender.create_ping(Vec::new());
+            receiver.receive(&packet, now as u64).unwrap();
+        }
+
+        assert!(receiver.received_sequences.len() <= RUDP_RECEIVE_WINDOW_PACKETS as usize + 1);
+        assert!(receiver.received_sequence_is_stale(1));
+    }
+
+    #[test]
+    fn incomplete_fragment_sets_and_bytes_have_finite_bounds() {
+        let mut receiver = connected_session(1);
+        for index in 0..RUDP_MAX_INCOMPLETE_FRAGMENT_SETS {
+            let packet = CultNetRudpPacket {
+                packet_type: CultNetRudpPacketType::Data,
+                connection_id: receiver.connection_id(),
+                sequence: index as u32 + 1,
+                ack: 0,
+                ack_mask: 0,
+                channel_id: "schema".to_string(),
+                reliable: true,
+                ordered: true,
+                sequenced: false,
+                fragment_id: index as u16 + 1,
+                fragment_index: 0,
+                fragment_count: 2,
+                payload: vec![index as u8],
+            };
+            receiver.receive(&packet, index as u64 + 1).unwrap();
+        }
+        let too_many_sets = CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Data,
+            connection_id: receiver.connection_id(),
+            sequence: RUDP_MAX_INCOMPLETE_FRAGMENT_SETS as u32 + 1,
+            ack: 0,
+            ack_mask: 0,
+            channel_id: "schema".to_string(),
+            reliable: true,
+            ordered: true,
+            sequenced: false,
+            fragment_id: RUDP_MAX_INCOMPLETE_FRAGMENT_SETS as u16 + 1,
+            fragment_index: 0,
+            fragment_count: 2,
+            payload: vec![0],
+        };
+        assert!(
+            receiver
+                .receive(&too_many_sets, 100)
+                .unwrap_err()
+                .to_string()
+                .contains("too many incomplete fragment sets")
+        );
+
+        receiver.reset_peer_state();
+        receiver.assume_connected(101);
+        let oversized_fragment = CultNetRudpPacket {
+            fragment_id: 1,
+            sequence: 1,
+            payload: vec![0; RUDP_MAX_REASSEMBLY_BYTES + 1],
+            ..too_many_sets
+        };
+        assert!(
+            receiver
+                .receive(&oversized_fragment, 102)
+                .unwrap_err()
+                .to_string()
+                .contains("fragment bytes exceed")
+        );
+        assert!(receiver.fragment_buffers.is_empty());
+        assert_eq!(receiver.fragment_buffered_bytes, 0);
     }
 }
