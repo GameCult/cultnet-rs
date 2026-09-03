@@ -4,7 +4,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::Path;
 
@@ -260,10 +260,43 @@ pub fn open_service_identity_at<P: ServiceIdentityProfile>(
         bail!("service identity store {} does not exist", path.display());
     }
     let entries = SingleFileMessagePackBackingStore::new(path).pull_all()?;
-    if entries.len() != 1 {
-        bail!("service identity store must contain exactly one immutable envelope");
+    open_service_identity_envelopes::<P>(&entries)
+}
+
+/// Opens an immutable service-identity credential from a read-only stream.
+///
+/// Unlike [`open_service_identity_at`], this path has no sibling-lock or
+/// writable-filesystem requirement. It is intended for immutable credential
+/// copies such as systemd `LoadCredential` files.
+pub fn open_service_identity_credential_reader<P: ServiceIdentityProfile>(
+    mut reader: impl Read,
+) -> Result<ServiceIdentitySigner<P>> {
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .context("failed to read immutable service identity credential")?;
+    open_service_identity_credential_bytes::<P>(&bytes)
+}
+
+/// Opens an immutable service-identity credential from its exact bytes.
+pub fn open_service_identity_credential_bytes<P: ServiceIdentityProfile>(
+    bytes: &[u8],
+) -> Result<ServiceIdentitySigner<P>> {
+    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
+    let entries = Vec::<CultCacheEnvelope>::deserialize(&mut decoder)
+        .context("immutable service identity credential is malformed MessagePack")?;
+    if decoder.position() != bytes.len() as u64 {
+        bail!("immutable service identity credential contains trailing data");
     }
-    let envelope = &entries[0];
+    open_service_identity_envelopes::<P>(&entries)
+}
+
+fn open_service_identity_envelopes<P: ServiceIdentityProfile>(
+    entries: &[CultCacheEnvelope],
+) -> Result<ServiceIdentitySigner<P>> {
+    let [envelope] = entries else {
+        bail!("service identity store must contain exactly one immutable envelope");
+    };
     if envelope.r#type != P::PRIVATE_TYPE
         || envelope.key != P::PRIVATE_KEY
         || envelope.schema_id.as_deref() != Some(P::PRIVATE_SCHEMA)
@@ -660,6 +693,69 @@ mod tests {
         assert_eq!(
             open_service_identity_at::<IdunnServiceIdentity>(&path)?.entry(),
             signer.entry()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn immutable_credential_reader_opens_without_a_path_and_retains_signing_authority() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("provider-health.cc");
+        let enrolled = enroll_service_identity_at::<GameCultProviderHealthIdentity>(&path)?;
+        let bytes = std::fs::read(path)?;
+
+        let from_reader = open_service_identity_credential_reader::<GameCultProviderHealthIdentity>(
+            std::io::Cursor::new(bytes.clone()),
+        )?;
+        let from_bytes =
+            open_service_identity_credential_bytes::<GameCultProviderHealthIdentity>(&bytes)?;
+        assert_eq!(from_reader.entry(), enrolled.entry());
+        assert_eq!(from_bytes.entry(), enrolled.entry());
+
+        let payload = b"runtime-presence";
+        let proof = from_reader.sign::<GameCultRuntimePresenceHealthPurpose>(payload);
+        verify_service_identity_signature::<
+            GameCultProviderHealthIdentity,
+            GameCultRuntimePresenceHealthPurpose,
+        >(&enrolled.trust_anchor()?, payload, &proof)?;
+        Ok(())
+    }
+
+    #[test]
+    fn immutable_credential_reader_rejects_ambiguous_profile_or_machine_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("idunn.ccmp");
+        enroll_service_identity_at::<IdunnServiceIdentity>(&path)?;
+        let bytes = std::fs::read(path)?;
+
+        assert!(
+            open_service_identity_credential_bytes::<GameCultProviderHealthIdentity>(&bytes)
+                .is_err()
+        );
+
+        let mut envelopes: Vec<CultCacheEnvelope> = rmp_serde::from_slice(&bytes)?;
+        let mut duplicated = envelopes.clone();
+        duplicated.push(envelopes[0].clone());
+        assert!(
+            open_service_identity_credential_bytes::<IdunnServiceIdentity>(&rmp_serde::to_vec(
+                &duplicated
+            )?)
+            .is_err()
+        );
+
+        let mut trailing = bytes.clone();
+        trailing.push(0xc0);
+        assert!(open_service_identity_credential_bytes::<IdunnServiceIdentity>(&trailing).is_err());
+
+        let mut entry: ServiceIdentityPrivateEntry = rmp_serde::from_slice(&envelopes[0].payload)?;
+        entry.protector_binding.push_str(":another-machine");
+        envelopes[0].payload = rmp_serde::to_vec(&entry)?;
+        assert!(
+            open_service_identity_credential_bytes::<IdunnServiceIdentity>(&rmp_serde::to_vec(
+                &envelopes
+            )?)
+            .is_err()
         );
         Ok(())
     }
