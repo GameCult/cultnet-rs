@@ -26,6 +26,10 @@ const RUDP_VERSION: u8 = 0;
 const RUDP_FIXED_HEADER_BYTES: usize = 36;
 const DEFAULT_MEDIA_RELIABLE_EXPIRE_AFTER_MS: u64 = 75;
 const RUDP_RECEIVE_WINDOW_PACKETS: u32 = 1024;
+// Sequence zero is the "no acknowledgement" sentinel, and u32::MAX is the
+// exhausted cursor. Packets use the monotonic domain between them and never
+// wrap inside one session.
+const RUDP_MAX_PACKET_SEQUENCE: u32 = u32::MAX - 1;
 const RUDP_MAX_TRACKED_CHANNELS: usize = 64;
 const RUDP_MAX_INCOMPLETE_FRAGMENT_SETS: usize = 64;
 const RUDP_MAX_FRAGMENTS_PER_FRAME: u16 = 1024;
@@ -150,13 +154,22 @@ struct FragmentBuffer {
     sequences: BTreeMap<u16, u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceivedSequenceDisposition {
+    New,
+    Duplicate,
+    Stale,
+    OutsideWindow,
+}
+
 pub struct CultNetRudpSession {
     session_scope: Uuid,
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
     next_sequence: u32,
-    next_fragment_id: u16,
+    highest_sent_sequence: Option<u32>,
+    next_fragment_id: u32,
     connected: bool,
     last_received_at_ms: Option<u64>,
     highest_received_sequence: Option<u32>,
@@ -180,6 +193,7 @@ impl CultNetRudpSession {
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
             next_sequence: options.initial_sequence,
+            highest_sent_sequence: None,
             next_fragment_id: 1,
             connected: false,
             last_received_at_ms: None,
@@ -284,7 +298,7 @@ impl CultNetRudpSession {
             true,
             true,
             false,
-        );
+        )?;
         self.track_reliable(
             &CultNetRudpSendOptions {
                 reliable: true,
@@ -316,6 +330,15 @@ impl CultNetRudpSession {
         if !was_connected {
             self.ensure_reliable_capacity(1)?;
         }
+        match self.received_sequence_disposition(packet.sequence) {
+            ReceivedSequenceDisposition::New | ReceivedSequenceDisposition::Duplicate => {}
+            ReceivedSequenceDisposition::Stale | ReceivedSequenceDisposition::OutsideWindow => {
+                return Err(anyhow!(
+                    "RUDP connect packet sequence is outside the receive window"
+                ));
+            }
+        }
+        self.ensure_sequence_capacity(1)?;
         self.remember_received(packet.sequence);
         self.last_received_at_ms = Some(now_ms);
         self.connected = true;
@@ -326,7 +349,7 @@ impl CultNetRudpSession {
             true,
             true,
             false,
-        );
+        )?;
         if !was_connected {
             self.track_reliable(
                 &CultNetRudpSendOptions {
@@ -374,11 +397,15 @@ impl CultNetRudpSession {
             }
             if payload.len() > max_fragment_bytes {
                 let fragment_count = payload.len().div_ceil(max_fragment_bytes);
-                if fragment_count > u16::MAX as usize {
-                    return Err(anyhow!("RUDP payload requires more than 65535 fragments"));
+                if fragment_count > RUDP_MAX_FRAGMENTS_PER_FRAME as usize {
+                    return Err(anyhow!(
+                        "RUDP payload requires more than {} fragments",
+                        RUDP_MAX_FRAGMENTS_PER_FRAME
+                    ));
                 }
                 self.ensure_reliable_capacity(if options.reliable { fragment_count } else { 0 })?;
-                let fragment_id = self.allocate_fragment_id();
+                self.ensure_sequence_capacity(fragment_count)?;
+                let fragment_id = self.allocate_fragment_id()?;
                 let mut packets = Vec::new();
                 for index in 0..fragment_count {
                     let start = index * max_fragment_bytes;
@@ -393,7 +420,7 @@ impl CultNetRudpSession {
                         fragment_id,
                         index as u16,
                         fragment_count as u16,
-                    );
+                    )?;
                     if packet.reliable {
                         self.track_reliable(&options, packet.clone());
                     }
@@ -404,6 +431,7 @@ impl CultNetRudpSession {
         }
 
         self.ensure_reliable_capacity(if options.reliable { 1 } else { 0 })?;
+        self.ensure_sequence_capacity(1)?;
         let packet = self.create_packet(
             CultNetRudpPacketType::Data,
             channel_id,
@@ -411,7 +439,7 @@ impl CultNetRudpSession {
             options.reliable,
             options.ordered,
             options.sequenced,
-        );
+        )?;
         if packet.reliable {
             self.track_reliable(&options, packet.clone());
         }
@@ -424,15 +452,25 @@ impl CultNetRudpSession {
         now_ms: u64,
     ) -> Result<CultNetRudpReceiveResult> {
         self.require_connection(packet)?;
-        self.apply_acknowledgements(packet);
-        self.last_received_at_ms = Some(now_ms);
+        let sequence_disposition = self.received_sequence_disposition(packet.sequence);
+        if sequence_disposition != ReceivedSequenceDisposition::New {
+            return Ok(Self::empty_receive_result());
+        }
+        if packet.packet_type == CultNetRudpPacketType::Data {
+            self.validate_reassembly_input(packet)?;
+        }
+        let acknowledgements_are_valid = self.acknowledgements_are_valid(packet);
         let expected_sequence_if_uninitialized = self
             .highest_received_sequence
-            .map(|sequence| sequence + 1)
+            .and_then(|sequence| sequence.checked_add(1))
             .unwrap_or(packet.sequence);
+        self.remember_received(packet.sequence);
+        if acknowledgements_are_valid {
+            self.apply_acknowledgements(packet);
+        }
+        self.last_received_at_ms = Some(now_ms);
 
         if packet.packet_type == CultNetRudpPacketType::Accept {
-            self.remember_received(packet.sequence);
             self.connected = true;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -445,7 +483,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Ping {
-            self.remember_received(packet.sequence);
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: Some(self.create_packet(
@@ -455,7 +492,7 @@ impl CultNetRudpSession {
                     false,
                     false,
                     false,
-                )),
+                )?),
                 pong: false,
                 pong_payload: Vec::new(),
                 disconnected: false,
@@ -466,7 +503,6 @@ impl CultNetRudpSession {
         if packet.packet_type == CultNetRudpPacketType::Ack
             || packet.packet_type == CultNetRudpPacketType::Pong
         {
-            self.remember_received(packet.sequence);
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
@@ -482,7 +518,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Disconnect {
-            self.remember_received(packet.sequence);
             self.connected = false;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -495,30 +530,6 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type != CultNetRudpPacketType::Data {
-            return Ok(CultNetRudpReceiveResult {
-                delivered: Vec::new(),
-                reply: None,
-                pong: false,
-                pong_payload: Vec::new(),
-                disconnected: false,
-                disconnect_reason: Vec::new(),
-            });
-        }
-
-        if self.received_sequence_is_stale(packet.sequence) {
-            return Ok(CultNetRudpReceiveResult {
-                delivered: Vec::new(),
-                reply: None,
-                pong: false,
-                pong_payload: Vec::new(),
-                disconnected: false,
-                disconnect_reason: Vec::new(),
-            });
-        }
-
-        let duplicate = self.received_sequences.contains(&packet.sequence);
-        self.remember_received(packet.sequence);
-        if duplicate {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 reply: None,
@@ -578,7 +589,7 @@ impl CultNetRudpSession {
         })
     }
 
-    pub fn create_ack(&mut self) -> CultNetRudpPacket {
+    pub fn create_ack(&mut self) -> Result<CultNetRudpPacket> {
         self.create_packet(
             CultNetRudpPacketType::Ack,
             "control",
@@ -589,7 +600,7 @@ impl CultNetRudpSession {
         )
     }
 
-    pub fn create_ping(&mut self, payload: Vec<u8>) -> CultNetRudpPacket {
+    pub fn create_ping(&mut self, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
         self.create_packet(
             CultNetRudpPacketType::Ping,
             "control",
@@ -600,16 +611,17 @@ impl CultNetRudpSession {
         )
     }
 
-    pub fn create_disconnect(&mut self, reason: Vec<u8>) -> CultNetRudpPacket {
-        self.connected = false;
-        self.create_packet(
+    pub fn create_disconnect(&mut self, reason: Vec<u8>) -> Result<CultNetRudpPacket> {
+        let packet = self.create_packet(
             CultNetRudpPacketType::Disconnect,
             "control",
             reason,
             false,
             false,
             false,
-        )
+        )?;
+        self.connected = false;
+        Ok(packet)
     }
 
     pub fn check_timeout(&mut self, now_ms: u64, timeout_ms: u64) -> bool {
@@ -647,7 +659,7 @@ impl CultNetRudpSession {
         reliable: bool,
         ordered: bool,
         sequenced: bool,
-    ) -> CultNetRudpPacket {
+    ) -> Result<CultNetRudpPacket> {
         self.create_packet_with_fragments(
             packet_type,
             channel_id,
@@ -673,14 +685,10 @@ impl CultNetRudpSession {
         fragment_id: u16,
         fragment_index: u16,
         fragment_count: u16,
-    ) -> CultNetRudpPacket {
-        let sequence = self.next_sequence;
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .expect("sequence overflow");
+    ) -> Result<CultNetRudpPacket> {
+        let sequence = self.allocate_sequence()?;
         let (ack, ack_mask) = self.ack_state();
-        CultNetRudpPacket {
+        Ok(CultNetRudpPacket {
             packet_type,
             connection_id: self.connection_id,
             sequence,
@@ -694,7 +702,7 @@ impl CultNetRudpSession {
             fragment_index,
             fragment_count,
             payload,
-        }
+        })
     }
 
     fn track_reliable(&mut self, options: &CultNetRudpSendOptions, packet: CultNetRudpPacket) {
@@ -716,11 +724,45 @@ impl CultNetRudpSession {
             return Ok(());
         }
         if let Some(limit) = self.max_pending_reliable_packets {
-            if self.pending_reliable.len() + packet_count > limit {
+            if self
+                .pending_reliable
+                .len()
+                .checked_add(packet_count)
+                .is_none_or(|required| required > limit)
+            {
                 return Err(anyhow!("RUDP reliable send queue is full"));
             }
         }
         Ok(())
+    }
+
+    fn ensure_sequence_capacity(&self, packet_count: usize) -> Result<()> {
+        if packet_count == 0 {
+            return Ok(());
+        }
+        if self.next_sequence == 0 || self.next_sequence > RUDP_MAX_PACKET_SEQUENCE {
+            return Err(anyhow!("RUDP packet sequence space is exhausted"));
+        }
+        let additional = u32::try_from(packet_count - 1)
+            .map_err(|_| anyhow!("RUDP packet sequence request exceeds the session domain"))?;
+        let last = self
+            .next_sequence
+            .checked_add(additional)
+            .ok_or_else(|| anyhow!("RUDP packet sequence space is exhausted"))?;
+        if last > RUDP_MAX_PACKET_SEQUENCE {
+            return Err(anyhow!("RUDP packet sequence space is exhausted"));
+        }
+        Ok(())
+    }
+
+    fn allocate_sequence(&mut self) -> Result<u32> {
+        self.ensure_sequence_capacity(1)?;
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("RUDP packet sequence space is exhausted"))?;
+        self.highest_sent_sequence = Some(sequence);
+        Ok(sequence)
     }
 
     fn purge_expired_reliable(&mut self, now_ms: u64) {
@@ -742,7 +784,42 @@ impl CultNetRudpSession {
         }
     }
 
+    fn acknowledgements_are_valid(&self, packet: &CultNetRudpPacket) -> bool {
+        if packet.ack == 0 {
+            return packet.ack_mask == 0;
+        }
+        packet.ack <= RUDP_MAX_PACKET_SEQUENCE
+            && self
+                .highest_sent_sequence
+                .is_some_and(|highest_sent| packet.ack <= highest_sent)
+    }
+
+    fn received_sequence_disposition(&self, sequence: u32) -> ReceivedSequenceDisposition {
+        if sequence == 0 || sequence > RUDP_MAX_PACKET_SEQUENCE {
+            return ReceivedSequenceDisposition::OutsideWindow;
+        }
+        let Some(highest) = self.highest_received_sequence else {
+            return ReceivedSequenceDisposition::New;
+        };
+        if sequence > highest {
+            return if sequence - highest <= RUDP_RECEIVE_WINDOW_PACKETS {
+                ReceivedSequenceDisposition::New
+            } else {
+                ReceivedSequenceDisposition::OutsideWindow
+            };
+        }
+        if self.received_sequences.contains(&sequence) {
+            return ReceivedSequenceDisposition::Duplicate;
+        }
+        if highest - sequence > RUDP_RECEIVE_WINDOW_PACKETS {
+            ReceivedSequenceDisposition::Stale
+        } else {
+            ReceivedSequenceDisposition::New
+        }
+    }
+
     fn remember_received(&mut self, sequence: u32) {
+        debug_assert!((1..=RUDP_MAX_PACKET_SEQUENCE).contains(&sequence));
         self.received_sequences.insert(sequence);
         if self
             .highest_received_sequence
@@ -755,11 +832,6 @@ impl CultNetRudpSession {
             self.received_sequences
                 .retain(|received| *received >= first_retained);
         }
-    }
-
-    fn received_sequence_is_stale(&self, sequence: u32) -> bool {
-        self.highest_received_sequence
-            .is_some_and(|highest| sequence < highest.saturating_sub(RUDP_RECEIVE_WINDOW_PACKETS))
     }
 
     fn ack_state(&self) -> (u32, u32) {
@@ -785,8 +857,62 @@ impl CultNetRudpSession {
                     sequence: packet.sequence,
                 },
                 packet.ordered,
-                packet.sequence + 1,
+                Self::sequence_cursor_after(packet.sequence)?,
             )));
+        }
+        let key = (packet.channel_id.clone(), packet.fragment_id);
+        let buffer = self
+            .fragment_buffers
+            .entry(key.clone())
+            .or_insert_with(|| FragmentBuffer {
+                channel_id: packet.channel_id.clone(),
+                ordered: packet.ordered,
+                fragment_count: packet.fragment_count,
+                payloads: BTreeMap::new(),
+                sequences: BTreeMap::new(),
+            });
+        buffer
+            .payloads
+            .insert(packet.fragment_index, packet.payload.clone());
+        buffer
+            .sequences
+            .insert(packet.fragment_index, packet.sequence);
+        self.fragment_buffered_bytes += packet.payload.len();
+        if buffer.payloads.len() < packet.fragment_count as usize {
+            return Ok(None);
+        }
+
+        let frame_bytes = buffer.payloads.values().map(Vec::len).sum::<usize>();
+        let mut payload = Vec::with_capacity(frame_bytes);
+        let mut sequences = Vec::new();
+        for index in 0..packet.fragment_count {
+            let Some(chunk) = buffer.payloads.get(&index) else {
+                return Ok(None);
+            };
+            let Some(sequence) = buffer.sequences.get(&index) else {
+                return Ok(None);
+            };
+            payload.extend_from_slice(chunk);
+            sequences.push(*sequence);
+        }
+        let channel_id = buffer.channel_id.clone();
+        let ordered = buffer.ordered;
+        self.fragment_buffers.remove(&key);
+        self.fragment_buffered_bytes = self.fragment_buffered_bytes.saturating_sub(frame_bytes);
+        Ok(Some((
+            CultNetRudpDeliveredFrame {
+                channel_id,
+                payload,
+                sequence: *sequences.iter().min().unwrap(),
+            },
+            ordered,
+            Self::sequence_cursor_after(*sequences.iter().max().unwrap())?,
+        )))
+    }
+
+    fn validate_reassembly_input(&self, packet: &CultNetRudpPacket) -> Result<()> {
+        if packet.fragment_count == 0 {
+            return Ok(());
         }
         if packet.fragment_id == 0 {
             return Err(anyhow!(
@@ -830,58 +956,20 @@ impl CultNetRudpSession {
                 "RUDP incomplete fragment bytes exceed the session receive bound"
             ));
         }
-        let buffer = self
-            .fragment_buffers
-            .entry(key.clone())
-            .or_insert_with(|| FragmentBuffer {
-                channel_id: packet.channel_id.clone(),
-                ordered: packet.ordered,
-                fragment_count: packet.fragment_count,
-                payloads: BTreeMap::new(),
-                sequences: BTreeMap::new(),
-            });
-        if buffer.fragment_count != packet.fragment_count || buffer.ordered != packet.ordered {
+        if self.fragment_buffers.get(&key).is_some_and(|buffer| {
+            buffer.fragment_count != packet.fragment_count || buffer.ordered != packet.ordered
+        }) {
             return Err(anyhow!(
                 "RUDP fragment metadata changed within a fragment set"
             ));
         }
-        buffer
-            .payloads
-            .insert(packet.fragment_index, packet.payload.clone());
-        buffer
-            .sequences
-            .insert(packet.fragment_index, packet.sequence);
-        self.fragment_buffered_bytes += packet.payload.len();
-        if buffer.payloads.len() < packet.fragment_count as usize {
-            return Ok(None);
-        }
+        Ok(())
+    }
 
-        let frame_bytes = buffer.payloads.values().map(Vec::len).sum::<usize>();
-        let mut payload = Vec::with_capacity(frame_bytes);
-        let mut sequences = Vec::new();
-        for index in 0..packet.fragment_count {
-            let Some(chunk) = buffer.payloads.get(&index) else {
-                return Ok(None);
-            };
-            let Some(sequence) = buffer.sequences.get(&index) else {
-                return Ok(None);
-            };
-            payload.extend_from_slice(chunk);
-            sequences.push(*sequence);
-        }
-        let channel_id = buffer.channel_id.clone();
-        let ordered = buffer.ordered;
-        self.fragment_buffers.remove(&key);
-        self.fragment_buffered_bytes = self.fragment_buffered_bytes.saturating_sub(frame_bytes);
-        Ok(Some((
-            CultNetRudpDeliveredFrame {
-                channel_id,
-                payload,
-                sequence: *sequences.iter().min().unwrap(),
-            },
-            ordered,
-            sequences.iter().max().unwrap() + 1,
-        )))
+    fn sequence_cursor_after(sequence: u32) -> Result<u32> {
+        sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("RUDP packet sequence has no representable successor"))
     }
 
     fn deliver_ordered(
@@ -968,13 +1056,27 @@ impl CultNetRudpSession {
         delivered
     }
 
-    fn allocate_fragment_id(&mut self) -> u16 {
-        let fragment_id = self.next_fragment_id;
-        self.next_fragment_id = self.next_fragment_id.saturating_add(1);
-        if self.next_fragment_id == 0 {
-            self.next_fragment_id = 1;
+    fn allocate_fragment_id(&mut self) -> Result<u16> {
+        if self.next_fragment_id == 0 || self.next_fragment_id > u16::MAX as u32 {
+            return Err(anyhow!("RUDP fragment id space is exhausted"));
         }
-        fragment_id
+        let fragment_id = self.next_fragment_id as u16;
+        self.next_fragment_id = self
+            .next_fragment_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("RUDP fragment id space is exhausted"))?;
+        Ok(fragment_id)
+    }
+
+    fn empty_receive_result() -> CultNetRudpReceiveResult {
+        CultNetRudpReceiveResult {
+            delivered: Vec::new(),
+            reply: None,
+            pong: false,
+            pong_payload: Vec::new(),
+            disconnected: false,
+            disconnect_reason: Vec::new(),
+        }
     }
 
     fn require_connection(&self, packet: &CultNetRudpPacket) -> Result<()> {
@@ -1189,12 +1291,12 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn disconnect(&mut self, reason: Vec<u8>) -> Result<()> {
-        let packet = self.session.create_disconnect(reason);
+        let packet = self.session.create_disconnect(reason)?;
         self.send_packet(&packet)
     }
 
     pub fn ping(&mut self, payload: Vec<u8>) -> Result<()> {
-        let packet = self.session.create_ping(payload);
+        let packet = self.session.create_ping(payload)?;
         self.send_packet(&packet)
     }
 
@@ -1338,7 +1440,7 @@ impl CultNetRudpSocketTransportConnection {
         }
         let frame = self.delivered_frames.pop_front();
         if packet.packet_type == CultNetRudpPacketType::Accept || frame.is_some() {
-            let ack = self.session.create_ack();
+            let ack = self.session.create_ack()?;
             self.send_packet(&ack)?;
         }
         Ok(frame)
@@ -1593,6 +1695,28 @@ mod tests {
         session
     }
 
+    fn control_packet(
+        sequence: u32,
+        packet_type: CultNetRudpPacketType,
+        ack: u32,
+    ) -> CultNetRudpPacket {
+        CultNetRudpPacket {
+            packet_type,
+            connection_id: 0xCAFE_BABE,
+            sequence,
+            ack,
+            ack_mask: 0,
+            channel_id: "control".to_string(),
+            reliable: false,
+            ordered: false,
+            sequenced: false,
+            fragment_id: 0,
+            fragment_index: 0,
+            fragment_count: 0,
+            payload: Vec::new(),
+        }
+    }
+
     #[test]
     fn sequenced_unordered_channel_drops_older_late_frames() {
         let mut sender = connected_session(1);
@@ -1637,12 +1761,209 @@ mod tests {
         let mut sender = connected_session(1);
         let mut receiver = connected_session(1);
         for now in 1..=(RUDP_RECEIVE_WINDOW_PACKETS * 2) {
-            let packet = sender.create_ping(Vec::new());
+            let packet = sender.create_ping(Vec::new()).unwrap();
             receiver.receive(&packet, now as u64).unwrap();
         }
 
         assert!(receiver.received_sequences.len() <= RUDP_RECEIVE_WINDOW_PACKETS as usize + 1);
-        assert!(receiver.received_sequence_is_stale(1));
+        assert_eq!(
+            receiver.received_sequence_disposition(1),
+            ReceivedSequenceDisposition::Stale
+        );
+    }
+
+    #[test]
+    fn far_ahead_and_max_sequences_cannot_advance_receive_state() {
+        let mut receiver = connected_session(1);
+        receiver
+            .receive(&control_packet(10, CultNetRudpPacketType::Ack, 0), 10)
+            .unwrap();
+
+        let far_ahead = CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Data,
+            sequence: 10 + RUDP_RECEIVE_WINDOW_PACKETS + 1,
+            channel_id: "realtime".to_string(),
+            payload: b"poison".to_vec(),
+            ..control_packet(1, CultNetRudpPacketType::Ack, 0)
+        };
+        assert!(
+            receiver
+                .receive(&far_ahead, 11)
+                .unwrap()
+                .delivered
+                .is_empty()
+        );
+        assert!(
+            receiver
+                .receive(
+                    &control_packet(u32::MAX, CultNetRudpPacketType::Disconnect, 0),
+                    12,
+                )
+                .unwrap()
+                .delivered
+                .is_empty()
+        );
+        assert_eq!(receiver.highest_received_sequence, Some(10));
+        assert_eq!(receiver.last_received_at_ms(), Some(10));
+        assert!(receiver.connected());
+
+        let malformed = CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Data,
+            sequence: 11,
+            channel_id: "realtime".to_string(),
+            fragment_count: 2,
+            payload: b"poison".to_vec(),
+            ..control_packet(1, CultNetRudpPacketType::Ack, 0)
+        };
+        assert!(receiver.receive(&malformed, 13).is_err());
+        assert_eq!(receiver.highest_received_sequence, Some(10));
+
+        let valid = CultNetRudpPacket {
+            packet_type: CultNetRudpPacketType::Data,
+            sequence: 11,
+            channel_id: "realtime".to_string(),
+            payload: b"valid".to_vec(),
+            ..control_packet(1, CultNetRudpPacketType::Ack, 0)
+        };
+        assert_eq!(
+            receiver.receive(&valid, 14).unwrap().delivered[0].payload,
+            b"valid"
+        );
+    }
+
+    #[test]
+    fn far_ahead_and_duplicate_control_packets_cannot_poison_ack_state() {
+        let mut session = connected_session(100);
+        let sent = session
+            .send(
+                "schema",
+                b"pending".to_vec(),
+                CultNetRudpSendOptions {
+                    reliable: true,
+                    ordered: true,
+                    now_ms: 1,
+                    reliable_expire_after_ms: None,
+                    sequenced: false,
+                },
+            )
+            .unwrap();
+        session
+            .receive(&control_packet(10, CultNetRudpPacketType::Ack, 0), 2)
+            .unwrap();
+
+        let mut future_ack = control_packet(11, CultNetRudpPacketType::Ack, sent.sequence + 32);
+        future_ack.ack_mask = 1 << 31;
+        session.receive(&future_ack, 3).unwrap();
+        assert_eq!(session.pending_reliable_sequences(), vec![sent.sequence]);
+
+        let duplicate = control_packet(11, CultNetRudpPacketType::Ack, sent.sequence);
+        session.receive(&duplicate, 4).unwrap();
+        let far_ahead = control_packet(
+            11 + RUDP_RECEIVE_WINDOW_PACKETS + 1,
+            CultNetRudpPacketType::Ack,
+            sent.sequence,
+        );
+        session.receive(&far_ahead, 5).unwrap();
+        assert_eq!(session.pending_reliable_sequences(), vec![sent.sequence]);
+        assert_eq!(session.highest_received_sequence, Some(11));
+
+        let valid = control_packet(12, CultNetRudpPacketType::Ack, sent.sequence);
+        session.receive(&valid, 6).unwrap();
+        assert!(session.pending_reliable_sequences().is_empty());
+    }
+
+    #[test]
+    fn receive_and_send_exhaustion_boundaries_never_roll_over() {
+        let mut receiver = connected_session(1);
+        receiver
+            .receive(
+                &control_packet(RUDP_MAX_PACKET_SEQUENCE - 1, CultNetRudpPacketType::Ack, 0),
+                1,
+            )
+            .unwrap();
+        receiver
+            .receive(
+                &control_packet(RUDP_MAX_PACKET_SEQUENCE, CultNetRudpPacketType::Ack, 0),
+                2,
+            )
+            .unwrap();
+        receiver
+            .receive(&control_packet(u32::MAX, CultNetRudpPacketType::Ack, 0), 3)
+            .unwrap();
+        assert_eq!(
+            receiver.highest_received_sequence,
+            Some(RUDP_MAX_PACKET_SEQUENCE)
+        );
+        assert_eq!(receiver.ack_state().0, RUDP_MAX_PACKET_SEQUENCE);
+
+        let mut sender = connected_session(RUDP_MAX_PACKET_SEQUENCE);
+        assert_eq!(
+            sender.create_ping(Vec::new()).unwrap().sequence,
+            RUDP_MAX_PACKET_SEQUENCE
+        );
+        assert!(
+            sender
+                .create_ping(Vec::new())
+                .unwrap_err()
+                .to_string()
+                .contains("sequence space is exhausted")
+        );
+
+        let mut fragmented = connected_session(RUDP_MAX_PACKET_SEQUENCE);
+        let error = fragmented
+            .send_many(
+                "realtime",
+                vec![1, 2],
+                CultNetRudpSendOptions::default(),
+                Some(1),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("sequence space is exhausted"));
+        assert_eq!(
+            fragmented.create_ping(Vec::new()).unwrap().sequence,
+            RUDP_MAX_PACKET_SEQUENCE
+        );
+    }
+
+    #[test]
+    fn fragment_ids_exhaust_once_without_reuse_or_partial_send() {
+        let mut sender = connected_session(1);
+        sender.next_fragment_id = u16::MAX as u32;
+        let first = sender
+            .send_many(
+                "realtime",
+                vec![1, 2],
+                CultNetRudpSendOptions::default(),
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|packet| packet.fragment_id == u16::MAX));
+        let next_sequence = sender.next_sequence;
+
+        let error = sender
+            .send_many(
+                "realtime",
+                vec![3, 4],
+                CultNetRudpSendOptions::default(),
+                Some(1),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("fragment id space is exhausted"));
+        assert_eq!(sender.next_sequence, next_sequence);
+
+        let mut too_many = connected_session(1);
+        let error = too_many
+            .send_many(
+                "realtime",
+                vec![0; RUDP_MAX_FRAGMENTS_PER_FRAME as usize + 1],
+                CultNetRudpSendOptions::default(),
+                Some(1),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("more than 1024 fragments"));
+        assert_eq!(too_many.next_fragment_id, 1);
+        assert_eq!(too_many.next_sequence, 1);
     }
 
     #[test]

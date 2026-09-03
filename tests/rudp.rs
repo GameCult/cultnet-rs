@@ -246,7 +246,7 @@ fn rudp_session_handshake_acks_reliable_connect_and_accept_packets() -> Result<(
     assert!(client.connected());
     assert!(client.pending_reliable_sequences().is_empty());
 
-    let ack = client.create_ack();
+    let ack = client.create_ack()?;
     assert_eq!(ack.ack, 100);
     server.receive(&ack, 30)?;
     assert!(server.pending_reliable_sequences().is_empty());
@@ -316,14 +316,14 @@ fn rudp_session_computes_ack_masks_and_clears_pending_reliable_packets() -> Resu
 
     receiver.receive(&first, 0)?;
     receiver.receive(&third, 0)?;
-    let ack_with_gap = receiver.create_ack();
+    let ack_with_gap = receiver.create_ack()?;
     assert_eq!(ack_with_gap.ack, 12);
     assert_eq!(ack_with_gap.ack_mask, 0b10 | (1 << 9));
     sender.receive(&ack_with_gap, 0)?;
     assert_eq!(sender.pending_reliable_sequences(), vec![11]);
 
     receiver.receive(&second, 0)?;
-    let full_ack = receiver.create_ack();
+    let full_ack = receiver.create_ack()?;
     assert_eq!(full_ack.ack, 12);
     assert_eq!(full_ack.ack_mask, 0b11 | (1 << 9));
     sender.receive(&full_ack, 0)?;
@@ -484,7 +484,7 @@ fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
     let accept = server.accept_connect(&connect, 10, Vec::new())?;
     client.receive(&accept, 20)?;
 
-    let ping = client.create_ping(b"pulse".to_vec());
+    let ping = client.create_ping(b"pulse".to_vec())?;
     let ping_result = server.receive(&ping, 30)?;
     let pong = ping_result.reply.expect("ping should produce pong");
     assert_eq!(pong.packet_type, CultNetRudpPacketType::Pong);
