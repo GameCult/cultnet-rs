@@ -591,33 +591,35 @@ pub struct OdinRuntimeTopologyCorrelationRecord {
     #[cultcache(key = 8)]
     pub observed_write_lease_sha256: Option<String>,
     #[cultcache(key = 9)]
-    pub runtime_id: String,
+    pub observed_capabilities: Vec<GameCultRuntimeCapability>,
     #[cultcache(key = 10)]
-    pub runtime_instance_id: Option<String>,
+    pub runtime_id: String,
     #[cultcache(key = 11)]
-    pub present: bool,
+    pub runtime_instance_id: Option<String>,
     #[cultcache(key = 12)]
-    pub ready: bool,
+    pub present: bool,
     #[cultcache(key = 13)]
-    pub dependencies: Vec<OdinRuntimeDependencyEvidence>,
+    pub ready: bool,
     #[cultcache(key = 14)]
-    pub disagreements: Vec<OdinTopologyDisagreement>,
+    pub dependencies: Vec<OdinRuntimeDependencyEvidence>,
     #[cultcache(key = 15)]
-    pub signer_identity_id: String,
+    pub disagreements: Vec<OdinTopologyDisagreement>,
     #[cultcache(key = 16)]
-    pub publisher_sequence: u64,
+    pub signer_identity_id: String,
     #[cultcache(key = 17)]
-    pub observed_at_unix_millis: u64,
+    pub publisher_sequence: u64,
     #[cultcache(key = 18)]
+    pub observed_at_unix_millis: u64,
+    #[cultcache(key = 19)]
     pub signature_algorithm: String,
-    #[cultcache(key = 19, bytes)]
+    #[cultcache(key = 20, bytes)]
     pub signature: Vec<u8>,
 }
 
 impl OdinRuntimeTopologyCorrelationRecord {
     pub fn decode_canonical_signed_payload(payload: &[u8]) -> Result<(Self, Vec<u8>)> {
-        if messagepack_array_len(payload) != Some(20) {
-            bail!("topology correlation is not the 20-field positional contract");
+        if messagepack_array_len(payload) != Some(21) {
+            bail!("topology correlation is not the 21-field positional contract");
         }
         let receipt: Self =
             rmp_serde::from_slice(payload).context("decoding runtime topology correlation")?;
@@ -682,6 +684,15 @@ impl OdinRuntimeTopologyCorrelationRecord {
                 bail!("ready dependency does not meet Expected capacity");
             }
         }
+        let mut capability_disagreements = Vec::new();
+        correlate_capabilities(
+            &mut capability_disagreements,
+            &expected.capabilities,
+            &self.observed_capabilities,
+        );
+        if self.present && !capability_disagreements.is_empty() {
+            bail!("Present topology does not satisfy Expected capability requirements");
+        }
         if let Some(current_write_lease_sha256) = current_write_lease_sha256 {
             validate_required_sha256(current_write_lease_sha256, "current write lease sha256")?;
         }
@@ -728,6 +739,10 @@ impl OdinRuntimeTopologyCorrelationRecord {
             &self.observed_write_lease_sha256,
             "observed write lease sha256",
         )?;
+        validate_runtime_capabilities(&self.observed_capabilities)?;
+        if self.signed_presence_sha256.is_none() && !self.observed_capabilities.is_empty() {
+            bail!("topology correlation has capabilities without signed presence");
+        }
         match (
             &self.signed_presence_sha256,
             &self.observed_presence_state,
@@ -2043,6 +2058,16 @@ mod tests {
             observed_presence_state: Some("active".into()),
             observed_presence_publisher_sequence: Some(1),
             observed_write_lease_sha256: Some(digest('c')),
+            observed_capabilities: expected
+                .capabilities
+                .iter()
+                .map(|capability| GameCultRuntimeCapability {
+                    capability: capability.capability.clone(),
+                    schema: capability.schema.clone(),
+                    compatibility: capability.compatibility.clone(),
+                    capacity: capability.minimum_capacity,
+                })
+                .collect(),
             runtime_id: expected.runtime_id.clone(),
             runtime_instance_id: Some(digest('b')),
             present: true,
@@ -2277,6 +2302,7 @@ mod tests {
         receipt.observed_presence_state = Some(presence.record().state.clone());
         receipt.observed_presence_publisher_sequence = Some(presence.record().publisher_sequence);
         receipt.observed_write_lease_sha256 = presence.record().write_lease_sha256.clone();
+        receipt.observed_capabilities = presence.record().capabilities.clone();
         receipt.runtime_instance_id = Some(fixture.activation.runtime_instance_id.clone());
         receipt.present = present;
         receipt.ready = present && presence.record().state == "active";
@@ -2837,7 +2863,7 @@ mod tests {
         let receipt = topology_correlation(&expected);
         validate_against_current_lease(&receipt, &expected)?;
         let receipt_bytes = receipt.canonical_bytes()?;
-        assert_eq!(&receipt_bytes[..3], &[0xdc, 0, 20]);
+        assert_eq!(&receipt_bytes[..3], &[0xdc, 0, 21]);
         let (decoded, unsigned) =
             OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(&receipt_bytes)?;
         assert_eq!(decoded, receipt);
@@ -2863,7 +2889,7 @@ mod tests {
         assert!(IdunnExpectedIncarnationRecord::decode_canonical(&noncanonical_expected).is_err());
 
         let receipt = topology_correlation(&expected_incarnation()).canonical_bytes()?;
-        let mut noncanonical_receipt = vec![0xdd, 0, 0, 0, 20];
+        let mut noncanonical_receipt = vec![0xdd, 0, 0, 0, 21];
         noncanonical_receipt.extend_from_slice(&receipt[3..]);
         assert!(
             OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
@@ -2996,6 +3022,7 @@ mod tests {
         value.observed_presence_state = None;
         value.observed_presence_publisher_sequence = None;
         value.observed_write_lease_sha256 = None;
+        value.observed_capabilities.clear();
         value.present = false;
         value.ready = false;
         assert!(value.validate().is_err());
@@ -3142,6 +3169,23 @@ mod tests {
         let mut value = topology_correlation(&expected);
         value.dependencies[0].provider_evidence_sha256 = None;
         assert!(value.validate().is_err());
+
+        let mut missing_capability = topology_correlation(&expected);
+        missing_capability.observed_capabilities.pop();
+        assert!(missing_capability.validate().is_ok());
+        assert!(
+            missing_capability
+                .validate_against_expected(&expected, Some(&digest('c')))
+                .is_err()
+        );
+
+        let mut additional_capability = topology_correlation(&expected);
+        additional_capability
+            .observed_capabilities
+            .push(runtime_capability("telemetry"));
+        additional_capability
+            .validate_against_expected(&expected, Some(&digest('c')))
+            .unwrap();
     }
 
     #[test]
