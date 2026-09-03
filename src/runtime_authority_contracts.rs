@@ -690,6 +690,11 @@ impl OdinRuntimeTopologyCorrelationRecord {
             &expected.capabilities,
             &self.observed_capabilities,
         );
+        for disagreement in &capability_disagreements {
+            if !self.disagreements.contains(disagreement) {
+                bail!("topology correlation omits an observed capability disagreement");
+            }
+        }
         if self.present && !capability_disagreements.is_empty() {
             bail!("Present topology does not satisfy Expected capability requirements");
         }
@@ -3178,6 +3183,29 @@ mod tests {
                 .validate_against_expected(&expected, Some(&digest('c')))
                 .is_err()
         );
+        missing_capability.present = false;
+        missing_capability.ready = false;
+        missing_capability.disagreements = vec![OdinTopologyDisagreement {
+            code: "generic-mismatch".into(),
+            expected: Some("expected".into()),
+            observed: Some("observed".into()),
+        }];
+        assert!(
+            missing_capability
+                .validate_against_expected(&expected, Some(&digest('c')))
+                .is_err()
+        );
+        correlate_capabilities(
+            &mut missing_capability.disagreements,
+            &expected.capabilities,
+            &missing_capability.observed_capabilities,
+        );
+        missing_capability
+            .disagreements
+            .sort_by(|left, right| left.code.cmp(&right.code));
+        missing_capability
+            .validate_against_expected(&expected, Some(&digest('c')))
+            .unwrap();
 
         let mut additional_capability = topology_correlation(&expected);
         additional_capability
