@@ -695,9 +695,6 @@ impl OdinRuntimeTopologyCorrelationRecord {
                 bail!("topology correlation omits an observed capability disagreement");
             }
         }
-        if self.present && !capability_disagreements.is_empty() {
-            bail!("Present topology does not satisfy Expected capability requirements");
-        }
         if let Some(current_write_lease_sha256) = current_write_lease_sha256 {
             validate_required_sha256(current_write_lease_sha256, "current write lease sha256")?;
         }
@@ -775,18 +772,18 @@ impl OdinRuntimeTopologyCorrelationRecord {
             && (self.current_activation_sha256.is_none()
                 || self.signed_presence_sha256.is_none()
                 || self.observed_presence_publisher_sequence.is_none()
-                || self.runtime_instance_id.is_none()
-                || !self.disagreements.is_empty())
+                || self.runtime_instance_id.is_none())
         {
-            bail!("Present topology state lacks exact undisputed runtime evidence");
+            bail!("Present topology state lacks an authenticated runtime session");
         }
         validate_dependency_evidence(&self.dependencies)?;
         validate_topology_disagreements(&self.disagreements)?;
         let has_activation = self.current_activation_sha256.is_some();
         let has_presence = self.signed_presence_sha256.is_some();
-        if (has_activation != has_presence || (has_activation && !self.present))
-            && self.disagreements.is_empty()
-        {
+        if has_activation && has_presence && !self.present {
+            bail!("authenticated runtime session cannot be projected as not Present");
+        }
+        if has_activation != has_presence && self.disagreements.is_empty() {
             bail!("partial or rejected runtime evidence lacks an explicit disagreement");
         }
         if self.ready
@@ -1098,37 +1095,33 @@ pub fn authenticate_odin_runtime_topology_correlation(
 }
 
 /// Odin's deterministic interpretation of an authenticated provider claim.
-/// Disagreement preserves signed evidence for inspection but grants no Present
-/// authority. Only the Present arm may feed Ready derivation.
+/// Authentication of the stable provider and current activation establishes
+/// Present. Correlation disagreements remain explicit and deny Ready; they do
+/// not erase the observed session that produced them.
 #[derive(Clone, Debug)]
-pub enum RuntimePresenceCorrelation {
-    Present(VerifiedRuntimePresence),
-    Disagrees {
-        claim: AuthenticatedRuntimePresenceClaim,
-        disagreements: Vec<OdinTopologyDisagreement>,
-    },
+pub struct RuntimePresenceCorrelation {
+    presence: VerifiedRuntimePresence,
+    disagreements: Vec<OdinTopologyDisagreement>,
 }
 
 impl RuntimePresenceCorrelation {
     pub fn claim(&self) -> &AuthenticatedRuntimePresenceClaim {
-        match self {
-            Self::Present(presence) => &presence.claim,
-            Self::Disagrees { claim, .. } => claim,
-        }
+        &self.presence.claim
     }
 
     pub fn disagreements(&self) -> &[OdinTopologyDisagreement] {
-        match self {
-            Self::Present(_) => &[],
-            Self::Disagrees { disagreements, .. } => disagreements,
-        }
+        &self.disagreements
     }
 
-    pub fn into_present(self) -> Result<VerifiedRuntimePresence> {
-        match self {
-            Self::Present(presence) => Ok(presence),
-            Self::Disagrees { .. } => bail!("runtime presence disagrees with current authority"),
+    pub fn into_present(self) -> VerifiedRuntimePresence {
+        self.presence
+    }
+
+    pub fn into_undisputed_present(self) -> Result<VerifiedRuntimePresence> {
+        if !self.disagreements.is_empty() {
+            bail!("runtime presence disagrees with current Expected projection");
         }
+        Ok(self.presence)
     }
 }
 
@@ -1339,16 +1332,10 @@ pub fn correlate_runtime_presence_claim(
     );
     disagreements.sort_by(|left, right| left.code.cmp(&right.code));
     validate_topology_disagreements(&disagreements)?;
-    if !disagreements.is_empty() {
-        return Ok(RuntimePresenceCorrelation::Disagrees {
-            claim,
-            disagreements,
-        });
-    }
-
-    Ok(RuntimePresenceCorrelation::Present(
-        VerifiedRuntimePresence { claim },
-    ))
+    Ok(RuntimePresenceCorrelation {
+        presence: VerifiedRuntimePresence { claim },
+        disagreements,
+    })
 }
 
 fn push_disagreement(
@@ -2291,7 +2278,7 @@ mod tests {
     }
 
     fn verify_fixture(fixture: &DualProofFixture) -> Result<VerifiedRuntimePresence> {
-        correlate_fixture(fixture)?.into_present()
+        correlate_fixture(fixture)?.into_undisputed_present()
     }
 
     fn authenticated_topology_receipt(
@@ -2382,7 +2369,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_expected_disagreements_remain_typed_and_non_present() -> Result<()> {
+    fn authenticated_expected_disagreements_remain_typed_present_and_not_ready() -> Result<()> {
         type Mutation = fn(&mut GameCultRuntimePresenceHealthRecord);
         let cases: &[(&str, &str, Mutation)] = &[
             ("target", "target", |value| value.target = "epiphany".into()),
@@ -2432,7 +2419,11 @@ mod tests {
                     .any(|disagreement| disagreement.code == *expected_code),
                 "missing {expected_code} disagreement for {name}"
             );
-            assert!(correlation.into_present().is_err());
+            assert_eq!(
+                correlation.claim().record().runtime_instance_id,
+                fixture.presence.runtime_instance_id
+            );
+            assert!(correlation.into_undisputed_present().is_err());
         }
         Ok(())
     }
@@ -3183,7 +3174,7 @@ mod tests {
                 .validate_against_expected(&expected, Some(&digest('c')))
                 .is_err()
         );
-        missing_capability.present = false;
+        missing_capability.present = true;
         missing_capability.ready = false;
         missing_capability.disagreements = vec![OdinTopologyDisagreement {
             code: "generic-mismatch".into(),
