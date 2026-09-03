@@ -1,21 +1,31 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use cultcache_rs::DatabaseEntry;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use zeroize::Zeroizing;
 
-pub const GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA: &str = "gamecult.runtime_presence_health.v1";
+pub const GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA: &str = "gamecult.runtime_presence_health.v2";
 pub const GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE: &str =
-    "gamecult.runtime_presence_health.v1";
-pub const IDUNN_RUNTIME_ACTIVATION_SCHEMA: &str = "idunn.runtime_activation.v1";
+    "gamecult.runtime_presence_health.v2";
+pub const GAMECULT_RUNTIME_ACTIVATION_PROOF_SIGNING_PURPOSE: &str =
+    "gamecult.runtime_presence.activation-proof.v1";
+pub const IDUNN_RUNTIME_ACTIVATION_SCHEMA: &str = "idunn.runtime_activation.v2";
+pub const IDUNN_RUNTIME_ACTIVATION_SIGNING_PURPOSE: &str = "idunn.runtime_activation.v2";
+pub const IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME: &str = "gamecult-idunn-runtime-activation-key";
 pub const IDUNN_PROCESS_WRITE_LEASE_SCHEMA: &str = "idunn.process_write_lease.v1";
-pub const IDUNN_EXPECTED_INCARNATION_SCHEMA: &str = "idunn.expected_incarnation.v1";
-pub const ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA: &str = "odin.runtime_topology_correlation.v1";
+pub const IDUNN_EXPECTED_INCARNATION_SCHEMA: &str = "idunn.expected_incarnation.v2";
+pub const ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA: &str = "odin.runtime_topology_correlation.v2";
 pub const ODIN_RUNTIME_TOPOLOGY_CORRELATION_SIGNING_PURPOSE: &str =
-    "odin.runtime_topology_correlation.v1";
+    "odin.runtime_topology_correlation.v2";
 
 const MAX_RUNTIME_CAPABILITIES: usize = 256;
 const MAX_RUNTIME_DEPENDENCIES: usize = 256;
 const MAX_TOPOLOGY_DISAGREEMENTS: usize = 256;
+const IDUNN_RUNTIME_ACTIVATION_ID_DOMAIN: &[u8] = b"idunn.runtime-activation.id.v1\0";
+const IDUNN_RUNTIME_ACTIVATION_SIGNATURE_DOMAIN: &[u8] = b"idunn.runtime-activation.signature.v1\0";
 
 /// One provider-owned capability claim inside a runtime-presence statement.
 /// The enclosing vector is canonical only when these records are strictly
@@ -30,14 +40,39 @@ pub struct GameCultRuntimeCapability {
     pub capacity: u32,
 }
 
-/// Provider-signed claim from one exact runtime launch. Present authority
-/// requires a matching Idunn-published current activation; this record cannot
-/// establish admission by itself. The signature covers the canonical
-/// positional encoding of this complete record with `signature` empty.
+impl GameCultRuntimeCapability {
+    fn identity(&self) -> (&str, &str, &str) {
+        (&self.capability, &self.schema, &self.compatibility)
+    }
+}
+
+/// Idunn's admitted requirement for one provider-owned runtime capability.
+/// The provider reports actual capacity in `GameCultRuntimeCapability`; this
+/// record states only the minimum needed for this incarnation to be Ready.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdunnExpectedCapability {
+    pub capability: String,
+    pub schema: String,
+    pub compatibility: String,
+    pub minimum_capacity: u32,
+}
+
+impl IdunnExpectedCapability {
+    fn identity(&self) -> (&str, &str, &str) {
+        (&self.capability, &self.schema, &self.compatibility)
+    }
+}
+
+/// Dual-proved claim from one exact runtime launch. The stable provider key and
+/// Idunn's activation-scoped ephemeral key both sign `canonical_proof_payload`:
+/// the canonical positional encoding of this complete record with both proof
+/// byte fields empty. Present authority requires a matching Idunn-published
+/// current activation; neither proof can establish admission by itself.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "gamecult.runtime_presence_health",
-    schema = "gamecult.runtime_presence_health.v1"
+    schema = "gamecult.runtime_presence_health.v2"
 )]
 pub struct GameCultRuntimePresenceHealthRecord {
     #[cultcache(key = 0)]
@@ -84,32 +119,22 @@ pub struct GameCultRuntimePresenceHealthRecord {
     pub signature_algorithm: String,
     #[cultcache(key = 21, bytes)]
     pub signature: Vec<u8>,
+    #[cultcache(key = 22)]
+    pub activation_signer_identity_id: String,
+    #[cultcache(key = 23, bytes)]
+    pub activation_signature: Vec<u8>,
 }
 
 impl GameCultRuntimePresenceHealthRecord {
-    /// Decode one exact current-generation positional record and return the
-    /// canonical bytes that its provider signature covers.
-    pub fn decode_canonical_signed_payload(payload: &[u8]) -> Result<(Self, Vec<u8>)> {
-        if messagepack_array_len(payload) != Some(22) {
-            bail!("runtime presence payload is not the 22-field positional contract");
-        }
-        let statement: Self =
-            rmp_serde::from_slice(payload).context("decoding runtime presence health")?;
-        if rmp_serde::to_vec(&statement)? != payload {
-            bail!("runtime presence payload is not canonical positional MessagePack");
-        }
-        statement.validate()?;
-        let unsigned = statement.unsigned_signature_payload()?;
-        Ok((statement, unsigned))
-    }
-
-    /// Return the canonical signature payload. A caller may use this while
-    /// constructing a statement with an empty signature or after decoding a
-    /// complete signed statement.
-    pub fn unsigned_signature_payload(&self) -> Result<Vec<u8>> {
+    /// Return the one canonical payload covered by both the stable provider
+    /// signature and the activation-scoped proof. Both signature fields are
+    /// empty in these bytes, avoiding circular signatures while binding every
+    /// authority-bearing statement field and both signer identities.
+    pub fn canonical_proof_payload(&self) -> Result<Vec<u8>> {
         self.validate_shape(true)?;
         let mut unsigned = self.clone();
         unsigned.signature.clear();
+        unsigned.activation_signature.clear();
         Ok(rmp_serde::to_vec(&unsigned)?)
     }
 
@@ -151,10 +176,16 @@ impl GameCultRuntimePresenceHealthRecord {
         validate_runtime_capabilities(&self.capabilities)?;
         validate_authority_identifier(&self.health_contract, "health contract")?;
         validate_authority_identifier(&self.signer_identity_id, "signer identity id")?;
+        validate_authority_identifier(
+            &self.activation_signer_identity_id,
+            "activation signer identity id",
+        )?;
         validate_optional_sha256(&self.write_lease_sha256, "write lease sha256")?;
 
         let signature_is_valid =
             self.signature.len() == 64 || (allow_unsigned && self.signature.is_empty());
+        let activation_signature_is_valid = self.activation_signature.len() == 64
+            || (allow_unsigned && self.activation_signature.is_empty());
         if self.publisher_sequence == 0
             || self.observed_at_unix_millis == 0
             || !matches!(
@@ -165,6 +196,7 @@ impl GameCultRuntimePresenceHealthRecord {
             || self.detail.chars().any(char::is_control)
             || self.signature_algorithm != "ed25519"
             || !signature_is_valid
+            || !activation_signature_is_valid
         {
             bail!("runtime presence state, sequence, detail, or signature is invalid");
         }
@@ -304,7 +336,7 @@ impl IdunnExpectedDependency {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.expected_incarnation",
-    schema = "idunn.expected_incarnation.v1"
+    schema = "idunn.expected_incarnation.v2"
 )]
 pub struct IdunnExpectedIncarnationRecord {
     #[cultcache(key = 0)]
@@ -340,7 +372,7 @@ pub struct IdunnExpectedIncarnationRecord {
     #[cultcache(key = 15)]
     pub route: Option<IdunnExpectedRoute>,
     #[cultcache(key = 16)]
-    pub capabilities: Vec<GameCultRuntimeCapability>,
+    pub capabilities: Vec<IdunnExpectedCapability>,
     #[cultcache(key = 17)]
     pub dependencies: Vec<IdunnExpectedDependency>,
 }
@@ -402,7 +434,7 @@ impl IdunnExpectedIncarnationRecord {
         if let Some(route) = &self.route {
             route.validate()?;
         }
-        validate_runtime_capabilities(&self.capabilities)?;
+        validate_expected_capabilities(&self.capabilities)?;
         validate_expected_dependencies(&self.dependencies)?;
         Ok(())
     }
@@ -537,7 +569,7 @@ impl OdinTopologyDisagreement {
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "odin.runtime_topology_correlation",
-    schema = "odin.runtime_topology_correlation.v1"
+    schema = "odin.runtime_topology_correlation.v2"
 )]
 pub struct OdinRuntimeTopologyCorrelationRecord {
     #[cultcache(key = 0)]
@@ -555,35 +587,37 @@ pub struct OdinRuntimeTopologyCorrelationRecord {
     #[cultcache(key = 6)]
     pub observed_presence_state: Option<String>,
     #[cultcache(key = 7)]
-    pub observed_write_lease_sha256: Option<String>,
+    pub observed_presence_publisher_sequence: Option<u64>,
     #[cultcache(key = 8)]
-    pub runtime_id: String,
+    pub observed_write_lease_sha256: Option<String>,
     #[cultcache(key = 9)]
-    pub runtime_instance_id: Option<String>,
+    pub runtime_id: String,
     #[cultcache(key = 10)]
-    pub present: bool,
+    pub runtime_instance_id: Option<String>,
     #[cultcache(key = 11)]
-    pub ready: bool,
+    pub present: bool,
     #[cultcache(key = 12)]
-    pub dependencies: Vec<OdinRuntimeDependencyEvidence>,
+    pub ready: bool,
     #[cultcache(key = 13)]
-    pub disagreements: Vec<OdinTopologyDisagreement>,
+    pub dependencies: Vec<OdinRuntimeDependencyEvidence>,
     #[cultcache(key = 14)]
-    pub signer_identity_id: String,
+    pub disagreements: Vec<OdinTopologyDisagreement>,
     #[cultcache(key = 15)]
-    pub publisher_sequence: u64,
+    pub signer_identity_id: String,
     #[cultcache(key = 16)]
-    pub observed_at_unix_millis: u64,
+    pub publisher_sequence: u64,
     #[cultcache(key = 17)]
+    pub observed_at_unix_millis: u64,
+    #[cultcache(key = 18)]
     pub signature_algorithm: String,
-    #[cultcache(key = 18, bytes)]
+    #[cultcache(key = 19, bytes)]
     pub signature: Vec<u8>,
 }
 
 impl OdinRuntimeTopologyCorrelationRecord {
     pub fn decode_canonical_signed_payload(payload: &[u8]) -> Result<(Self, Vec<u8>)> {
-        if messagepack_array_len(payload) != Some(19) {
-            bail!("topology correlation is not the 19-field positional contract");
+        if messagepack_array_len(payload) != Some(20) {
+            bail!("topology correlation is not the 20-field positional contract");
         }
         let receipt: Self =
             rmp_serde::from_slice(payload).context("decoding runtime topology correlation")?;
@@ -687,6 +721,9 @@ impl OdinRuntimeTopologyCorrelationRecord {
         validate_optional_sha256(&self.current_activation_sha256, "current activation sha256")?;
         validate_optional_sha256(&self.signed_presence_sha256, "signed presence sha256")?;
         validate_optional_identifier(&self.observed_presence_state, "observed presence state")?;
+        if self.observed_presence_publisher_sequence == Some(0) {
+            bail!("observed presence publisher sequence is zero");
+        }
         validate_optional_sha256(
             &self.observed_write_lease_sha256,
             "observed write lease sha256",
@@ -694,17 +731,18 @@ impl OdinRuntimeTopologyCorrelationRecord {
         match (
             &self.signed_presence_sha256,
             &self.observed_presence_state,
+            self.observed_presence_publisher_sequence,
             &self.observed_write_lease_sha256,
         ) {
-            (None, None, None) => {}
-            (Some(_), Some(state), write_lease)
+            (None, None, None, None) => {}
+            (Some(_), Some(state), Some(_), write_lease)
                 if matches!(state.as_str(), "warming" | "active" | "degraded" | "failed") =>
             {
                 if state == "warming" && write_lease.is_some() {
                     bail!("warming topology presence cannot carry a process write lease");
                 }
             }
-            _ => bail!("signed presence state or write-lease observation is partial"),
+            _ => bail!("signed presence state, sequence, or write-lease observation is partial"),
         }
         validate_authority_identifier(&self.runtime_id, "runtime id")?;
         validate_optional_sha256(&self.runtime_instance_id, "runtime instance id")?;
@@ -716,9 +754,11 @@ impl OdinRuntimeTopologyCorrelationRecord {
         if self.present
             && (self.current_activation_sha256.is_none()
                 || self.signed_presence_sha256.is_none()
-                || self.runtime_instance_id.is_none())
+                || self.observed_presence_publisher_sequence.is_none()
+                || self.runtime_instance_id.is_none()
+                || !self.disagreements.is_empty())
         {
-            bail!("Present topology state lacks activation or signed presence");
+            bail!("Present topology state lacks exact undisputed runtime evidence");
         }
         validate_dependency_evidence(&self.dependencies)?;
         validate_topology_disagreements(&self.disagreements)?;
@@ -754,15 +794,610 @@ impl OdinRuntimeTopologyCorrelationRecord {
     }
 }
 
-/// Idunn-issued launch identity. The exact bytes are passed to one workload
-/// launch alongside the Expected projection. Creation alone grants nothing:
-/// Odin treats this as current process observation only while Idunn publishes
-/// it on the authenticated observed-activation surface after the actuator
-/// driver verifies the native runtime instance.
+/// An in-memory activation-scoped signer reconstructed by the launched service
+/// from its protected systemd credential. The stable service identity never
+/// receives this key, and the public activation record never contains it.
+pub struct IdunnRuntimeActivationSigner {
+    signing_key: SigningKey,
+}
+
+impl IdunnRuntimeActivationSigner {
+    fn generate() -> Self {
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        rand::rng().fill_bytes(seed.as_mut());
+        Self {
+            signing_key: SigningKey::from_bytes(&*seed),
+        }
+    }
+
+    /// Open the exact raw 32-byte Ed25519 seed supplied through Idunn's systemd
+    /// credential without retaining an ordinary heap copy. No persistent key
+    /// schema exists: this authority lives for one activation and is replaced
+    /// on every launch.
+    pub fn from_credential_reader(mut credential: impl Read) -> Result<Self> {
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        credential
+            .read_exact(seed.as_mut())
+            .context("reading runtime activation credential")?;
+        let mut extra = [0_u8; 1];
+        if credential.read(&mut extra)? != 0 {
+            bail!("runtime activation credential is longer than 32 bytes");
+        }
+        Ok(Self {
+            signing_key: SigningKey::from_bytes(&*seed),
+        })
+    }
+
+    fn write_credential(&self, mut destination: impl Write) -> Result<()> {
+        let seed = Zeroizing::new(self.signing_key.to_bytes());
+        destination
+            .write_all(seed.as_ref())
+            .context("writing runtime activation credential")
+    }
+
+    pub fn public_key(&self) -> Vec<u8> {
+        self.signing_key.verifying_key().to_bytes().to_vec()
+    }
+
+    pub fn identity_id(&self) -> String {
+        derive_idunn_runtime_activation_identity_id(&self.public_key())
+            .expect("an Ed25519 activation signer always has a 32-byte public key")
+    }
+
+    pub fn sign_presence_proof(
+        &self,
+        presence: &GameCultRuntimePresenceHealthRecord,
+    ) -> Result<Vec<u8>> {
+        if presence.activation_signer_identity_id != self.identity_id() {
+            bail!("runtime presence names a different activation signer");
+        }
+        let payload = presence.canonical_proof_payload()?;
+        Ok(self
+            .signing_key
+            .sign(&runtime_activation_signing_message(&payload))
+            .to_bytes()
+            .to_vec())
+    }
+}
+
+/// Idunn's one-shot launch material. Issuance always creates a fresh key, and
+/// writing the protected credential consumes the only Idunn-side signer.
+pub struct IdunnRuntimeActivationLaunch {
+    activation: IdunnRuntimeActivationRecord,
+    signer: IdunnRuntimeActivationSigner,
+}
+
+impl IdunnRuntimeActivationLaunch {
+    pub fn issue(
+        expected: &IdunnExpectedIncarnationRecord,
+        runtime_instance_id: String,
+        issued_at_unix_millis: u64,
+        idunn_signer: &crate::ServiceIdentitySigner<crate::IdunnServiceIdentity>,
+    ) -> Result<Self> {
+        let signer = IdunnRuntimeActivationSigner::generate();
+        let activation = IdunnRuntimeActivationRecord::issue_with_signer(
+            expected,
+            runtime_instance_id,
+            &signer,
+            issued_at_unix_millis,
+            idunn_signer,
+        )?;
+        Ok(Self { activation, signer })
+    }
+
+    pub fn activation(&self) -> &IdunnRuntimeActivationRecord {
+        &self.activation
+    }
+
+    pub fn write_credential(self, destination: impl Write) -> Result<IdunnRuntimeActivationRecord> {
+        self.signer.write_credential(destination)?;
+        Ok(self.activation)
+    }
+}
+
+/// Derive the activation-scoped identity from the Idunn-issued public key. The
+/// domain is dedicated to runtime activation and cannot be substituted for a
+/// stable provider, Idunn, or Odin service identity.
+pub fn derive_idunn_runtime_activation_identity_id(public_key: &[u8]) -> Result<String> {
+    if public_key.len() != 32 {
+        bail!("runtime activation public key has invalid length");
+    }
+    Ok(format!(
+        "{:x}",
+        Sha256::digest([IDUNN_RUNTIME_ACTIVATION_ID_DOMAIN, public_key].concat())
+    ))
+}
+
+/// Current Idunn authority for one launch. Idunn's stable signature binds the
+/// complete Expected digest and activation key; Expected in turn pins the
+/// provider signer identity. The provider public key is lookup material, not a
+/// second authority: its profile-derived identity must equal Idunn's signed
+/// selection exactly.
+#[derive(Clone, Debug)]
+pub struct VerifiedRuntimeAuthority {
+    expected: IdunnExpectedIncarnationRecord,
+    activation: IdunnRuntimeActivationRecord,
+    provider_signer_public_key: Vec<u8>,
+    expected_sha256: String,
+    activation_sha256: String,
+}
+
+impl VerifiedRuntimeAuthority {
+    pub fn expected(&self) -> &IdunnExpectedIncarnationRecord {
+        &self.expected
+    }
+
+    pub fn activation(&self) -> &IdunnRuntimeActivationRecord {
+        &self.activation
+    }
+
+    pub fn expected_sha256(&self) -> &str {
+        &self.expected_sha256
+    }
+
+    pub fn activation_sha256(&self) -> &str {
+        &self.activation_sha256
+    }
+}
+
+pub fn verify_runtime_authority(
+    expected: &IdunnExpectedIncarnationRecord,
+    activation: &IdunnRuntimeActivationRecord,
+    idunn_anchor: &crate::ServiceIdentityTrustAnchor,
+    provider_signer_public_key: &[u8],
+) -> Result<VerifiedRuntimeAuthority> {
+    expected.validate()?;
+    activation.verify_for_expected(expected, idunn_anchor)?;
+    if crate::derive_service_identity_id::<crate::GameCultProviderHealthIdentity>(
+        provider_signer_public_key,
+    )? != expected.expected_signer_identity_id
+    {
+        bail!("provider public key is not Idunn's Expected signer selection");
+    }
+    Ok(VerifiedRuntimeAuthority {
+        expected: expected.clone(),
+        activation: activation.clone(),
+        provider_signer_public_key: provider_signer_public_key.to_vec(),
+        expected_sha256: expected.canonical_sha256()?,
+        activation_sha256: activation.canonical_sha256()?,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimePresenceAuthenticationContext {
+    pub trusted_received_at_unix_millis: u64,
+    pub maximum_age_millis: u64,
+    pub maximum_future_skew_millis: u64,
+}
+
+/// Canonical runtime bytes authenticated by both the Expected provider key and
+/// the current activation key. No semantic claim has yet been accepted as
+/// Present; Odin must correlate this observation against current authority.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedRuntimePresenceClaim {
+    record: GameCultRuntimePresenceHealthRecord,
+    canonical_bytes: Vec<u8>,
+    signed_presence_sha256: String,
+    received_at_unix_millis: u64,
+}
+
+impl AuthenticatedRuntimePresenceClaim {
+    pub fn record(&self) -> &GameCultRuntimePresenceHealthRecord {
+        &self.record
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    pub fn signed_presence_sha256(&self) -> &str {
+        &self.signed_presence_sha256
+    }
+
+    pub fn received_at_unix_millis(&self) -> u64 {
+        self.received_at_unix_millis
+    }
+}
+
+/// A signed Odin receipt authenticated against the exact current Expected,
+/// activation, write lease, Idunn-admitted topology key, and trusted receipt
+/// time. This is evidence, not a replay cursor or route-promotion grant. The
+/// caller must source the key from Idunn's admitted Odin binding. Idunn's
+/// durable admission owner must atomically check and advance Odin's publisher
+/// sequence before treating the receipt as current.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedOdinRuntimeTopologyCorrelation {
+    record: OdinRuntimeTopologyCorrelationRecord,
+    canonical_bytes: Vec<u8>,
+}
+
+impl AuthenticatedOdinRuntimeTopologyCorrelation {
+    pub fn record(&self) -> &OdinRuntimeTopologyCorrelationRecord {
+        &self.record
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OdinTopologyAuthenticationContext {
+    pub trusted_received_at_unix_millis: u64,
+    pub maximum_age_millis: u64,
+    pub maximum_future_skew_millis: u64,
+}
+
+pub fn authenticate_odin_runtime_topology_correlation(
+    canonical_correlation: &[u8],
+    authority: &VerifiedRuntimeAuthority,
+    current_write_lease_sha256: Option<&str>,
+    admitted_odin_signer_public_key: &[u8],
+    context: OdinTopologyAuthenticationContext,
+) -> Result<AuthenticatedOdinRuntimeTopologyCorrelation> {
+    ensure!(
+        context.trusted_received_at_unix_millis > 0 && context.maximum_age_millis > 0,
+        "Odin topology trusted time and maximum age must be positive"
+    );
+    let (record, unsigned) = OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
+        canonical_correlation,
+    )?;
+    record.validate_against_expected(authority.expected(), current_write_lease_sha256)?;
+    if record.current_activation_sha256.as_deref() != Some(authority.activation_sha256())
+        || record.runtime_instance_id.as_deref()
+            != Some(authority.activation.runtime_instance_id.as_str())
+    {
+        bail!("topology correlation does not bind the current activation");
+    }
+    let latest_trusted_timestamp = context
+        .trusted_received_at_unix_millis
+        .saturating_add(context.maximum_future_skew_millis);
+    if record.observed_at_unix_millis > latest_trusted_timestamp
+        || context
+            .trusted_received_at_unix_millis
+            .saturating_sub(record.observed_at_unix_millis)
+            > context.maximum_age_millis
+    {
+        bail!("Odin topology correlation is outside the trusted observation window");
+    }
+    crate::verify_service_identity_signature_with_public_key::<
+        crate::OdinTopologyIdentity,
+        crate::OdinRuntimeTopologyCorrelationPurpose,
+    >(
+        admitted_odin_signer_public_key,
+        &unsigned,
+        &crate::ServiceIdentitySignature {
+            identity_id: record.signer_identity_id.clone(),
+            signature: record.signature.clone(),
+        },
+    )?;
+    Ok(AuthenticatedOdinRuntimeTopologyCorrelation {
+        record,
+        canonical_bytes: canonical_correlation.to_vec(),
+    })
+}
+
+/// Odin's deterministic interpretation of an authenticated provider claim.
+/// Disagreement preserves signed evidence for inspection but grants no Present
+/// authority. Only the Present arm may feed Ready derivation.
+#[derive(Clone, Debug)]
+pub enum RuntimePresenceCorrelation {
+    Present(VerifiedRuntimePresence),
+    Disagrees {
+        claim: AuthenticatedRuntimePresenceClaim,
+        disagreements: Vec<OdinTopologyDisagreement>,
+    },
+}
+
+impl RuntimePresenceCorrelation {
+    pub fn claim(&self) -> &AuthenticatedRuntimePresenceClaim {
+        match self {
+            Self::Present(presence) => &presence.claim,
+            Self::Disagrees { claim, .. } => claim,
+        }
+    }
+
+    pub fn disagreements(&self) -> &[OdinTopologyDisagreement] {
+        match self {
+            Self::Present(_) => &[],
+            Self::Disagrees { disagreements, .. } => disagreements,
+        }
+    }
+
+    pub fn into_present(self) -> Result<VerifiedRuntimePresence> {
+        match self {
+            Self::Present(presence) => Ok(presence),
+            Self::Disagrees { .. } => bail!("runtime presence disagrees with current authority"),
+        }
+    }
+}
+
+/// A dual-authenticated claim that matches current authority. This is the only
+/// value that represents semantic Present. Replay admission deliberately does
+/// not live here: Odin's durable store must atomically check and advance every
+/// authenticated provider sequence, including disagreement-bearing claims,
+/// before it signs a topology correlation.
+#[derive(Clone, Debug)]
+pub struct VerifiedRuntimePresence {
+    claim: AuthenticatedRuntimePresenceClaim,
+}
+
+impl VerifiedRuntimePresence {
+    pub fn record(&self) -> &GameCultRuntimePresenceHealthRecord {
+        self.claim.record()
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.claim.canonical_bytes()
+    }
+
+    pub fn signed_presence_sha256(&self) -> &str {
+        self.claim.signed_presence_sha256()
+    }
+
+    pub fn accepted_at_unix_millis(&self) -> u64 {
+        self.claim.received_at_unix_millis()
+    }
+}
+
+pub fn authenticate_runtime_presence_claim(
+    canonical_presence: &[u8],
+    authority: &VerifiedRuntimeAuthority,
+    context: RuntimePresenceAuthenticationContext,
+) -> Result<AuthenticatedRuntimePresenceClaim> {
+    ensure!(
+        context.trusted_received_at_unix_millis > 0 && context.maximum_age_millis > 0,
+        "runtime presence trusted time and maximum age must be positive"
+    );
+    if messagepack_array_len(canonical_presence) != Some(24) {
+        bail!("runtime presence payload is not the 24-field positional contract");
+    }
+    let presence: GameCultRuntimePresenceHealthRecord =
+        rmp_serde::from_slice(canonical_presence).context("decoding runtime presence health")?;
+    if rmp_serde::to_vec(&presence)? != canonical_presence {
+        bail!("runtime presence payload is not canonical positional MessagePack");
+    }
+    presence.validate()?;
+    let latest_trusted_timestamp = context
+        .trusted_received_at_unix_millis
+        .saturating_add(context.maximum_future_skew_millis);
+    if presence.observed_at_unix_millis > latest_trusted_timestamp
+        || authority.activation.issued_at_unix_millis > latest_trusted_timestamp
+        || context
+            .trusted_received_at_unix_millis
+            .saturating_sub(presence.observed_at_unix_millis)
+            > context.maximum_age_millis
+    {
+        bail!("runtime presence is outside the trusted observation window");
+    }
+    if presence.signer_identity_id != authority.expected.expected_signer_identity_id {
+        bail!("runtime presence signer is not Idunn's Expected signer selection");
+    }
+
+    let proof_payload = presence.canonical_proof_payload()?;
+    crate::verify_service_identity_signature_with_public_key::<
+        crate::GameCultProviderHealthIdentity,
+        crate::GameCultRuntimePresenceHealthPurpose,
+    >(
+        &authority.provider_signer_public_key,
+        &proof_payload,
+        &crate::ServiceIdentitySignature {
+            identity_id: presence.signer_identity_id.clone(),
+            signature: presence.signature.clone(),
+        },
+    )?;
+    let activation_public_key: [u8; 32] = authority
+        .activation
+        .activation_signer_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("runtime activation public key has invalid length"))?;
+    let activation_signature = Signature::from_slice(&presence.activation_signature)
+        .map_err(|_| anyhow::anyhow!("runtime activation signature has invalid length"))?;
+    VerifyingKey::from_bytes(&activation_public_key)?
+        .verify(
+            &runtime_activation_signing_message(&proof_payload),
+            &activation_signature,
+        )
+        .map_err(|_| anyhow::anyhow!("runtime activation proof verification failed"))?;
+
+    Ok(AuthenticatedRuntimePresenceClaim {
+        record: presence,
+        canonical_bytes: canonical_presence.to_vec(),
+        signed_presence_sha256: prefixed_sha256(canonical_presence),
+        received_at_unix_millis: context.trusted_received_at_unix_millis,
+    })
+}
+
+pub fn correlate_runtime_presence_claim(
+    claim: AuthenticatedRuntimePresenceClaim,
+    authority: &VerifiedRuntimeAuthority,
+) -> Result<RuntimePresenceCorrelation> {
+    let expected = authority.expected();
+    let activation = authority.activation();
+    let presence = claim.record();
+    let expected_endpoint = expected
+        .route
+        .as_ref()
+        .map(|route| route.candidate_endpoint.clone());
+    let mut disagreements = Vec::new();
+    push_disagreement(
+        &mut disagreements,
+        "activation-signer-identity",
+        Some(&activation.activation_signer_identity_id),
+        Some(&presence.activation_signer_identity_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "activation-witness",
+        Some(authority.activation_sha256()),
+        Some(&presence.activation_witness_sha256),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "bound-endpoint",
+        expected_endpoint.as_deref(),
+        presence.bound_endpoint.as_deref(),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "expected-projection",
+        Some(authority.expected_sha256()),
+        Some(&presence.expected_projection_sha256),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "health-contract",
+        Some(&expected.health_contract),
+        Some(&presence.health_contract),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "incarnation-id",
+        Some(&expected.incarnation_id),
+        Some(&presence.incarnation_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "plan-id",
+        Some(&expected.plan_id),
+        Some(&presence.plan_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "runtime-id",
+        Some(&expected.runtime_id),
+        Some(&presence.runtime_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "runtime-instance-id",
+        Some(&activation.runtime_instance_id),
+        Some(&presence.runtime_instance_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "sealed-release-id",
+        Some(&expected.sealed_release_id),
+        Some(&presence.sealed_release_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "signer-identity",
+        Some(&expected.expected_signer_identity_id),
+        Some(&presence.signer_identity_id),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "state-contract",
+        expected.state_contract_sha256.as_deref(),
+        presence.state_contract_sha256.as_deref(),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "state-schema-generation",
+        expected.state_schema_generation.as_deref(),
+        presence.state_schema_generation.as_deref(),
+    );
+    push_disagreement(
+        &mut disagreements,
+        "target",
+        Some(&expected.target),
+        Some(&presence.target),
+    );
+    if activation.issued_at_unix_millis > presence.observed_at_unix_millis {
+        disagreements.push(OdinTopologyDisagreement {
+            code: "activation-issued-after-presence".into(),
+            expected: Some(format!("at-most:{}", presence.observed_at_unix_millis)),
+            observed: Some(activation.issued_at_unix_millis.to_string()),
+        });
+    }
+    correlate_capabilities(
+        &mut disagreements,
+        &expected.capabilities,
+        &presence.capabilities,
+    );
+    disagreements.sort_by(|left, right| left.code.cmp(&right.code));
+    validate_topology_disagreements(&disagreements)?;
+    if !disagreements.is_empty() {
+        return Ok(RuntimePresenceCorrelation::Disagrees {
+            claim,
+            disagreements,
+        });
+    }
+
+    Ok(RuntimePresenceCorrelation::Present(
+        VerifiedRuntimePresence { claim },
+    ))
+}
+
+fn push_disagreement(
+    disagreements: &mut Vec<OdinTopologyDisagreement>,
+    code: &str,
+    expected: Option<&str>,
+    observed: Option<&str>,
+) {
+    if expected != observed {
+        disagreements.push(OdinTopologyDisagreement {
+            code: code.into(),
+            expected: expected.map(str::to_string),
+            observed: observed.map(str::to_string),
+        });
+    }
+}
+
+fn correlate_capabilities(
+    disagreements: &mut Vec<OdinTopologyDisagreement>,
+    expected: &[IdunnExpectedCapability],
+    observed: &[GameCultRuntimeCapability],
+) {
+    for (index, required) in expected.iter().enumerate() {
+        let actual = observed
+            .iter()
+            .find(|actual| actual.identity() == required.identity());
+        let requirement = format!(
+            "{}/{}/{} capacity>={}",
+            required.capability, required.schema, required.compatibility, required.minimum_capacity
+        );
+        match actual {
+            None => disagreements.push(OdinTopologyDisagreement {
+                code: format!("expected-capability-{index:03}-missing"),
+                expected: Some(requirement),
+                observed: None,
+            }),
+            Some(actual) if actual.capacity < required.minimum_capacity => {
+                disagreements.push(OdinTopologyDisagreement {
+                    code: format!("expected-capability-{index:03}-capacity"),
+                    expected: Some(requirement),
+                    observed: Some(format!("capacity={}", actual.capacity)),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+fn runtime_activation_signing_message(payload: &[u8]) -> Vec<u8> {
+    let purpose = GAMECULT_RUNTIME_ACTIVATION_PROOF_SIGNING_PURPOSE.as_bytes();
+    let mut out = Vec::with_capacity(
+        IDUNN_RUNTIME_ACTIVATION_SIGNATURE_DOMAIN.len() + purpose.len() + payload.len() + 16,
+    );
+    out.extend_from_slice(IDUNN_RUNTIME_ACTIVATION_SIGNATURE_DOMAIN);
+    out.extend_from_slice(&(purpose.len() as u64).to_be_bytes());
+    out.extend_from_slice(purpose);
+    out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Idunn-issued launch identity. Idunn's stable service identity signs the
+/// complete activation, including the ephemeral public key, before the private
+/// credential is passed to one workload alongside Expected. Odin still treats
+/// it as current only after Idunn publishes an observed native process.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "idunn.runtime_activation",
-    schema = "idunn.runtime_activation.v1"
+    schema = "idunn.runtime_activation.v2"
 )]
 pub struct IdunnRuntimeActivationRecord {
     #[cultcache(key = 0)]
@@ -770,15 +1405,55 @@ pub struct IdunnRuntimeActivationRecord {
     #[cultcache(key = 1)]
     pub expected_projection_sha256: String,
     #[cultcache(key = 2)]
-    pub runtime_instance_id: String,
+    pub runtime_id: String,
     #[cultcache(key = 3)]
+    pub runtime_instance_id: String,
+    #[cultcache(key = 4)]
+    pub activation_signer_identity_id: String,
+    #[cultcache(key = 5, bytes)]
+    pub activation_signer_public_key: Vec<u8>,
+    #[cultcache(key = 6)]
     pub issued_at_unix_millis: u64,
+    #[cultcache(key = 7)]
+    pub idunn_signer_identity_id: String,
+    #[cultcache(key = 8)]
+    pub signature_algorithm: String,
+    #[cultcache(key = 9, bytes)]
+    pub signature: Vec<u8>,
 }
 
 impl IdunnRuntimeActivationRecord {
+    fn issue_with_signer(
+        expected: &IdunnExpectedIncarnationRecord,
+        runtime_instance_id: String,
+        activation_signer: &IdunnRuntimeActivationSigner,
+        issued_at_unix_millis: u64,
+        idunn_signer: &crate::ServiceIdentitySigner<crate::IdunnServiceIdentity>,
+    ) -> Result<Self> {
+        expected.validate()?;
+        let mut activation = Self {
+            schema_version: IDUNN_RUNTIME_ACTIVATION_SCHEMA.into(),
+            expected_projection_sha256: expected.canonical_sha256()?,
+            runtime_id: expected.runtime_id.clone(),
+            runtime_instance_id,
+            activation_signer_identity_id: activation_signer.identity_id(),
+            activation_signer_public_key: activation_signer.public_key(),
+            issued_at_unix_millis,
+            idunn_signer_identity_id: idunn_signer.entry().identity_id.clone(),
+            signature_algorithm: "ed25519".into(),
+            signature: Vec::new(),
+        };
+        let proof = idunn_signer.sign::<crate::IdunnRuntimeActivationPurpose>(
+            &activation.unsigned_signature_payload()?,
+        );
+        activation.signature = proof.signature;
+        activation.validate()?;
+        Ok(activation)
+    }
+
     pub fn decode_canonical(payload: &[u8]) -> Result<Self> {
-        if messagepack_array_len(payload) != Some(4) {
-            bail!("runtime activation is not the 4-field positional contract");
+        if messagepack_array_len(payload) != Some(10) {
+            bail!("runtime activation is not the 10-field positional contract");
         }
         let activation: Self =
             rmp_serde::from_slice(payload).context("decoding runtime activation")?;
@@ -798,7 +1473,44 @@ impl IdunnRuntimeActivationRecord {
         Ok(prefixed_sha256(&self.canonical_bytes()?))
     }
 
+    pub fn unsigned_signature_payload(&self) -> Result<Vec<u8>> {
+        self.validate_shape(true)?;
+        let mut unsigned = self.clone();
+        unsigned.signature.clear();
+        Ok(rmp_serde::to_vec(&unsigned)?)
+    }
+
+    pub fn verify_for_expected(
+        &self,
+        expected: &IdunnExpectedIncarnationRecord,
+        idunn_anchor: &crate::ServiceIdentityTrustAnchor,
+    ) -> Result<()> {
+        self.validate()?;
+        expected.validate()?;
+        if self.expected_projection_sha256 != expected.canonical_sha256()?
+            || self.runtime_id != expected.runtime_id
+        {
+            bail!("runtime activation does not bind the current Expected incarnation");
+        }
+        crate::verify_service_identity_signature::<
+            crate::IdunnServiceIdentity,
+            crate::IdunnRuntimeActivationPurpose,
+        >(
+            idunn_anchor,
+            &self.unsigned_signature_payload()?,
+            &crate::ServiceIdentitySignature {
+                identity_id: self.idunn_signer_identity_id.clone(),
+                signature: self.signature.clone(),
+            },
+        )
+        .context("verifying Idunn runtime activation signature")
+    }
+
     pub fn validate(&self) -> Result<()> {
+        self.validate_shape(false)
+    }
+
+    fn validate_shape(&self, allow_unsigned: bool) -> Result<()> {
         if self.schema_version != IDUNN_RUNTIME_ACTIVATION_SCHEMA {
             bail!("runtime activation schema is unsupported");
         }
@@ -806,9 +1518,28 @@ impl IdunnRuntimeActivationRecord {
             &self.expected_projection_sha256,
             "activation expected projection sha256",
         )?;
+        validate_authority_identifier(&self.runtime_id, "activation runtime id")?;
         validate_required_sha256(&self.runtime_instance_id, "runtime instance id")?;
-        if self.issued_at_unix_millis == 0 {
-            bail!("runtime activation issue time is invalid");
+        validate_authority_identifier(
+            &self.activation_signer_identity_id,
+            "activation signer identity id",
+        )?;
+        if self.activation_signer_identity_id
+            != derive_idunn_runtime_activation_identity_id(&self.activation_signer_public_key)?
+        {
+            bail!("runtime activation signer identity does not match its public key");
+        }
+        validate_authority_identifier(
+            &self.idunn_signer_identity_id,
+            "Idunn activation signer identity id",
+        )?;
+        let signature_is_valid =
+            self.signature.len() == 64 || (allow_unsigned && self.signature.is_empty());
+        if self.issued_at_unix_millis == 0
+            || self.signature_algorithm != "ed25519"
+            || !signature_is_valid
+        {
+            bail!("runtime activation issue time or signature is invalid");
         }
         Ok(())
     }
@@ -1002,6 +1733,30 @@ fn validate_runtime_capabilities(capabilities: &[GameCultRuntimeCapability]) -> 
     Ok(())
 }
 
+fn validate_expected_capabilities(capabilities: &[IdunnExpectedCapability]) -> Result<()> {
+    if capabilities.len() > MAX_RUNTIME_CAPABILITIES {
+        bail!("Expected capability count exceeds its contract bound");
+    }
+    let mut previous: Option<(&str, &str, &str)> = None;
+    for capability in capabilities {
+        validate_authority_identifier(&capability.capability, "Expected capability")?;
+        validate_authority_identifier(&capability.schema, "Expected capability schema")?;
+        validate_authority_identifier(
+            &capability.compatibility,
+            "Expected capability compatibility",
+        )?;
+        if capability.minimum_capacity == 0 {
+            bail!("Expected capability minimum capacity is zero");
+        }
+        let identity = capability.identity();
+        if previous.is_some_and(|previous| previous >= identity) {
+            bail!("Expected capabilities are not strictly sorted and unique");
+        }
+        previous = Some(identity);
+    }
+    Ok(())
+}
+
 fn validate_expected_dependencies(dependencies: &[IdunnExpectedDependency]) -> Result<()> {
     if dependencies.len() > MAX_RUNTIME_DEPENDENCIES {
         bail!("Expected dependency count exceeds its contract bound");
@@ -1100,8 +1855,8 @@ mod tests {
         GameCultRuntimePresenceHealthPurpose, GameCultServiceTrustAnchorRecord,
         IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA, IdunnServiceIdentity,
         OdinRuntimeTopologyCorrelationPurpose, OdinTopologyIdentity, ServiceIdentitySignature,
-        ServiceSignaturePurpose, derive_service_identity_id, enroll_service_identity_at,
-        verify_service_identity_signature,
+        ServiceIdentitySigner, ServiceSignaturePurpose, derive_service_identity_id,
+        enroll_service_identity_at, verify_service_identity_signature,
     };
 
     struct WrongOdinTopologyPurpose;
@@ -1120,6 +1875,15 @@ mod tests {
             schema: format!("{name}.v1"),
             compatibility: "v1".into(),
             capacity: 1,
+        }
+    }
+
+    fn expected_capability(name: &str) -> IdunnExpectedCapability {
+        IdunnExpectedCapability {
+            capability: name.into(),
+            schema: format!("{name}.v1"),
+            compatibility: "v1".into(),
+            minimum_capacity: 1,
         }
     }
 
@@ -1150,15 +1914,24 @@ mod tests {
             observed_at_unix_millis: 100,
             signature_algorithm: "ed25519".into(),
             signature: vec![6; 64],
+            activation_signer_identity_id: "activation-signing-key".into(),
+            activation_signature: vec![7; 64],
         }
     }
 
     fn runtime_activation() -> IdunnRuntimeActivationRecord {
+        let signer = IdunnRuntimeActivationSigner::from_credential_reader(&[8; 32][..]).unwrap();
         IdunnRuntimeActivationRecord {
             schema_version: IDUNN_RUNTIME_ACTIVATION_SCHEMA.into(),
             expected_projection_sha256: digest('9'),
+            runtime_id: "ghostlight-yggdrasil-1".into(),
             runtime_instance_id: digest('8'),
+            activation_signer_identity_id: signer.identity_id(),
+            activation_signer_public_key: signer.public_key(),
             issued_at_unix_millis: 99,
+            idunn_signer_identity_id: "idunn-signing-key".into(),
+            signature_algorithm: "ed25519".into(),
+            signature: vec![5; 64],
         }
     }
 
@@ -1228,8 +2001,8 @@ mod tests {
                 candidate_endpoint: "http://127.0.0.1:14103".into(),
             }),
             capabilities: vec![
-                runtime_capability("conversation"),
-                runtime_capability("state"),
+                expected_capability("conversation"),
+                expected_capability("state"),
             ],
             dependencies: vec![
                 expected_dependency("shared-infrastructure", "rendezvous", Some("odin-ygg-1")),
@@ -1268,6 +2041,7 @@ mod tests {
             current_activation_sha256: Some(digest('9')),
             signed_presence_sha256: Some(digest('a')),
             observed_presence_state: Some("active".into()),
+            observed_presence_publisher_sequence: Some(1),
             observed_write_lease_sha256: Some(digest('c')),
             runtime_id: expected.runtime_id.clone(),
             runtime_instance_id: Some(digest('b')),
@@ -1337,25 +2111,214 @@ mod tests {
         }
     }
 
+    struct DualProofFixture {
+        stable_signer: ServiceIdentitySigner<GameCultProviderHealthIdentity>,
+        activation_signer: IdunnRuntimeActivationSigner,
+        odin_signer: ServiceIdentitySigner<OdinTopologyIdentity>,
+        idunn_anchor: crate::ServiceIdentityTrustAnchor,
+        stable_public_key: Vec<u8>,
+        odin_anchor: GameCultServiceTrustAnchorRecord,
+        expected: IdunnExpectedIncarnationRecord,
+        activation: IdunnRuntimeActivationRecord,
+        presence: GameCultRuntimePresenceHealthRecord,
+    }
+
+    fn dual_proof_fixture(identity_path: &std::path::Path) -> Result<DualProofFixture> {
+        let stable_signer =
+            enroll_service_identity_at::<GameCultProviderHealthIdentity>(identity_path)?;
+        let stable_public = stable_signer.trust_anchor()?;
+        let idunn_signer = enroll_service_identity_at::<IdunnServiceIdentity>(
+            &identity_path.with_extension("idunn.cc"),
+        )?;
+        let idunn_anchor = idunn_signer.trust_anchor()?;
+        let odin_signer = enroll_service_identity_at::<OdinTopologyIdentity>(
+            &identity_path.with_extension("odin.cc"),
+        )?;
+        let odin_public = odin_signer.trust_anchor()?;
+        let mut expected = expected_incarnation();
+        expected.expected_signer_identity_id = stable_public.identity_id.clone();
+        expected.capabilities[0].minimum_capacity = 2;
+        let launch =
+            IdunnRuntimeActivationLaunch::issue(&expected, digest('8'), 99, &idunn_signer)?;
+        let activation = launch.activation().clone();
+        let mut activation_credential = Vec::new();
+        assert_eq!(
+            launch.write_credential(&mut activation_credential)?,
+            activation
+        );
+        let activation_signer =
+            IdunnRuntimeActivationSigner::from_credential_reader(&activation_credential[..])?;
+
+        let stable_public_key = stable_public.public_key.clone();
+        let odin_anchor = GameCultServiceTrustAnchorRecord {
+            schema_version: GAMECULT_SERVICE_TRUST_ANCHOR_SCHEMA.into(),
+            trust_anchor_id: "root/odin/runtime-topology".into(),
+            service_id: "odin".into(),
+            runtime_id: "odin-yggdrasil-1".into(),
+            signer_identity_id: odin_public.identity_id,
+            signer_public_key: odin_public.public_key,
+            signature_algorithm: "ed25519".into(),
+            signing_purpose: ODIN_RUNTIME_TOPOLOGY_CORRELATION_SIGNING_PURPOSE.into(),
+            signed_schema: ODIN_RUNTIME_TOPOLOGY_CORRELATION_SCHEMA.into(),
+            binding_authority: "root".into(),
+            bound_at_unix_millis: 1,
+            expires_at_unix_millis: Some(1_000),
+            private_state_exposed: false,
+        };
+
+        let mut presence = runtime_presence();
+        presence.target = expected.target.clone();
+        presence.plan_id = expected.plan_id.clone();
+        presence.incarnation_id = expected.incarnation_id.clone();
+        presence.sealed_release_id = expected.sealed_release_id.clone();
+        presence.state_schema_generation = expected.state_schema_generation.clone();
+        presence.state_contract_sha256 = expected.state_contract_sha256.clone();
+        presence.bound_endpoint = expected
+            .route
+            .as_ref()
+            .map(|route| route.candidate_endpoint.clone());
+        presence.capabilities = expected
+            .capabilities
+            .iter()
+            .map(|capability| GameCultRuntimeCapability {
+                capability: capability.capability.clone(),
+                schema: capability.schema.clone(),
+                compatibility: capability.compatibility.clone(),
+                capacity: capability.minimum_capacity,
+            })
+            .collect();
+        presence.health_contract = expected.health_contract.clone();
+        presence.runtime_id = activation.runtime_id.clone();
+        presence.runtime_instance_id = activation.runtime_instance_id.clone();
+        presence.expected_projection_sha256 = activation.expected_projection_sha256.clone();
+        presence.activation_witness_sha256 = activation.canonical_sha256()?;
+        presence.signer_identity_id = stable_public.identity_id;
+        presence.activation_signer_identity_id = activation_signer.identity_id();
+        presence.observed_at_unix_millis = 110;
+        presence.signature.clear();
+        presence.activation_signature.clear();
+        let proof_payload = presence.canonical_proof_payload()?;
+        presence.signature = stable_signer
+            .sign::<GameCultRuntimePresenceHealthPurpose>(&proof_payload)
+            .signature;
+        presence.activation_signature = activation_signer.sign_presence_proof(&presence)?;
+
+        Ok(DualProofFixture {
+            stable_signer,
+            activation_signer,
+            odin_signer,
+            idunn_anchor,
+            stable_public_key,
+            odin_anchor,
+            expected,
+            activation,
+            presence,
+        })
+    }
+
+    fn resign_presence(fixture: &mut DualProofFixture) -> Result<Vec<u8>> {
+        fixture.presence.signature.clear();
+        fixture.presence.activation_signature.clear();
+        let proof_payload = fixture.presence.canonical_proof_payload()?;
+        fixture.presence.signature = fixture
+            .stable_signer
+            .sign::<GameCultRuntimePresenceHealthPurpose>(&proof_payload)
+            .signature;
+        fixture.presence.activation_signature = fixture
+            .activation_signer
+            .sign_presence_proof(&fixture.presence)?;
+        Ok(rmp_serde::to_vec(&fixture.presence)?)
+    }
+
+    fn fixture_authority(fixture: &DualProofFixture) -> Result<VerifiedRuntimeAuthority> {
+        verify_runtime_authority(
+            &fixture.expected,
+            &fixture.activation,
+            &fixture.idunn_anchor,
+            &fixture.stable_public_key,
+        )
+    }
+
+    fn authenticate_fixture(
+        fixture: &DualProofFixture,
+    ) -> Result<AuthenticatedRuntimePresenceClaim> {
+        authenticate_runtime_presence_claim(
+            &rmp_serde::to_vec(&fixture.presence)?,
+            &fixture_authority(fixture)?,
+            RuntimePresenceAuthenticationContext {
+                trusted_received_at_unix_millis: 120,
+                maximum_age_millis: 30,
+                maximum_future_skew_millis: 5,
+            },
+        )
+    }
+
+    fn correlate_fixture(fixture: &DualProofFixture) -> Result<RuntimePresenceCorrelation> {
+        correlate_runtime_presence_claim(
+            authenticate_fixture(fixture)?,
+            &fixture_authority(fixture)?,
+        )
+    }
+
+    fn verify_fixture(fixture: &DualProofFixture) -> Result<VerifiedRuntimePresence> {
+        correlate_fixture(fixture)?.into_present()
+    }
+
+    fn authenticated_topology_receipt(
+        fixture: &DualProofFixture,
+        presence: &VerifiedRuntimePresence,
+        present: bool,
+        disagreements: Vec<OdinTopologyDisagreement>,
+    ) -> Result<AuthenticatedOdinRuntimeTopologyCorrelation> {
+        let authority = fixture_authority(fixture)?;
+        let mut receipt = topology_correlation(&fixture.expected);
+        receipt.current_activation_sha256 = Some(authority.activation_sha256().into());
+        receipt.signed_presence_sha256 = Some(presence.signed_presence_sha256().into());
+        receipt.observed_presence_state = Some(presence.record().state.clone());
+        receipt.observed_presence_publisher_sequence = Some(presence.record().publisher_sequence);
+        receipt.observed_write_lease_sha256 = presence.record().write_lease_sha256.clone();
+        receipt.runtime_instance_id = Some(fixture.activation.runtime_instance_id.clone());
+        receipt.present = present;
+        receipt.ready = present && presence.record().state == "active";
+        receipt.disagreements = disagreements;
+        receipt.signer_identity_id = fixture.odin_anchor.signer_identity_id.clone();
+        receipt.signature.clear();
+        receipt.signature = fixture
+            .odin_signer
+            .sign::<OdinRuntimeTopologyCorrelationPurpose>(&receipt.unsigned_signature_payload()?)
+            .signature;
+        let encoded = receipt.canonical_bytes()?;
+        authenticate_odin_runtime_topology_correlation(
+            &encoded,
+            &authority,
+            presence.record().write_lease_sha256.as_deref(),
+            &fixture.odin_anchor.signer_public_key,
+            OdinTopologyAuthenticationContext {
+                trusted_received_at_unix_millis: 120,
+                maximum_age_millis: 30,
+                maximum_future_skew_millis: 5,
+            },
+        )
+    }
+
     #[test]
     fn runtime_authority_contracts_round_trip_as_canonical_positional_records() -> Result<()> {
         let presence = runtime_presence();
         presence.validate()?;
         let encoded_presence = rmp_serde::to_vec(&presence)?;
-        assert_eq!(messagepack_array_len(&encoded_presence), Some(22));
-        let (decoded_presence, unsigned) =
-            GameCultRuntimePresenceHealthRecord::decode_canonical_signed_payload(
-                &encoded_presence,
-            )?;
+        assert_eq!(messagepack_array_len(&encoded_presence), Some(24));
+        let decoded_presence: GameCultRuntimePresenceHealthRecord =
+            rmp_serde::from_slice(&encoded_presence)?;
         assert_eq!(decoded_presence, presence);
+        let unsigned = presence.canonical_proof_payload()?;
         let unsigned_presence: GameCultRuntimePresenceHealthRecord =
             rmp_serde::from_slice(&unsigned)?;
         assert!(unsigned_presence.signature.is_empty());
-        assert_eq!(unsigned, presence.unsigned_signature_payload()?);
+        assert!(unsigned_presence.activation_signature.is_empty());
 
         let activation = runtime_activation();
         let encoded_activation = activation.canonical_bytes()?;
-        assert_eq!(messagepack_array_len(&encoded_activation), Some(4));
+        assert_eq!(messagepack_array_len(&encoded_activation), Some(10));
         assert_eq!(
             IdunnRuntimeActivationRecord::decode_canonical(&encoded_activation)?,
             activation
@@ -1378,69 +2341,353 @@ mod tests {
     }
 
     #[test]
-    fn runtime_presence_signature_covers_the_exact_canonical_record() -> Result<()> {
+    fn exact_stable_and_activation_proofs_admit_runtime_presence() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let signer = enroll_service_identity_at::<GameCultProviderHealthIdentity>(
-            &temp.path().join("runtime-presence.cc"),
-        )?;
-        let anchor = signer.trust_anchor()?;
-        let mut presence = runtime_presence();
-        presence.signer_identity_id = anchor.identity_id.clone();
-        presence.signature.clear();
-        let unsigned = presence.unsigned_signature_payload()?;
-        let proof = signer.sign::<GameCultRuntimePresenceHealthPurpose>(&unsigned);
-        presence.signature = proof.signature.clone();
+        let fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        assert_eq!(fixture.activation.activation_signer_public_key.len(), 32);
+        let verified = verify_fixture(&fixture)?;
+        assert_eq!(verified.record(), &fixture.presence);
+        Ok(())
+    }
 
-        let encoded = rmp_serde::to_vec(&presence)?;
-        let (decoded, decoded_unsigned) =
-            GameCultRuntimePresenceHealthRecord::decode_canonical_signed_payload(&encoded)?;
-        verify_service_identity_signature::<
-            GameCultProviderHealthIdentity,
-            GameCultRuntimePresenceHealthPurpose,
-        >(
-            &anchor,
-            &decoded_unsigned,
-            &ServiceIdentitySignature {
-                identity_id: decoded.signer_identity_id,
-                signature: decoded.signature,
-            },
-        )?;
+    #[test]
+    fn authenticated_expected_disagreements_remain_typed_and_non_present() -> Result<()> {
+        type Mutation = fn(&mut GameCultRuntimePresenceHealthRecord);
+        let cases: &[(&str, &str, Mutation)] = &[
+            ("target", "target", |value| value.target = "epiphany".into()),
+            ("projection", "expected-projection", |value| {
+                value.expected_projection_sha256 = digest('0')
+            }),
+            ("plan", "plan-id", |value| value.plan_id = digest('0')),
+            ("incarnation", "incarnation-id", |value| {
+                value.incarnation_id = "ghostlight/other/1".into()
+            }),
+            ("release", "sealed-release-id", |value| {
+                value.sealed_release_id = digest('0')
+            }),
+            ("runtime", "runtime-id", |value| {
+                value.runtime_id = "ghostlight-other-runtime".into()
+            }),
+            ("process", "runtime-instance-id", |value| {
+                value.runtime_instance_id = digest('0')
+            }),
+            ("endpoint", "bound-endpoint", |value| {
+                value.bound_endpoint = Some("http://127.0.0.1:14104".into())
+            }),
+            ("health", "health-contract", |value| {
+                value.health_contract = "ghostlight.other-health.v1".into()
+            }),
+            ("state-generation", "state-schema-generation", |value| {
+                value.state_schema_generation = Some("world-v3".into())
+            }),
+            ("state-contract", "state-contract", |value| {
+                value.state_contract_sha256 = Some(digest('0'))
+            }),
+            ("activation", "activation-witness", |value| {
+                value.activation_witness_sha256 = digest('0')
+            }),
+        ];
 
-        let mut changed = decoded_unsigned;
-        changed.push(0);
+        let temp = tempfile::tempdir()?;
+        for (name, expected_code, mutate) in cases {
+            let mut fixture = dual_proof_fixture(&temp.path().join(format!("{name}.cc")))?;
+            mutate(&mut fixture.presence);
+            resign_presence(&mut fixture)?;
+            let correlation = correlate_fixture(&fixture)?;
+            assert!(
+                correlation
+                    .disagreements()
+                    .iter()
+                    .any(|disagreement| disagreement.code == *expected_code),
+                "missing {expected_code} disagreement for {name}"
+            );
+            assert!(correlation.into_present().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_owns_observed_capacity_while_expected_owns_only_the_minimum() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        fixture.presence.capabilities[0].capacity = 50;
+        fixture
+            .presence
+            .capabilities
+            .push(runtime_capability("telemetry"));
+        resign_presence(&mut fixture)?;
+        verify_fixture(&fixture)?;
+
+        fixture.presence.capabilities[0].capacity = 1;
+        fixture
+            .presence
+            .capabilities
+            .retain(|capability| capability.capability != "state");
+        resign_presence(&mut fixture)?;
+        let correlation = correlate_fixture(&fixture)?;
+        let codes = correlation
+            .disagreements()
+            .iter()
+            .map(|disagreement| disagreement.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"expected-capability-000-capacity"));
+        assert!(codes.contains(&"expected-capability-001-missing"));
+        assert!(!codes.iter().any(|code| code.contains("unexpected")));
+        Ok(())
+    }
+
+    #[test]
+    fn stable_proof_and_provider_key_substitution_fail_closed() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        fixture.presence.detail = "tampered after signing".into();
+        assert!(authenticate_fixture(&fixture).is_err());
+
+        let other_idunn = enroll_service_identity_at::<IdunnServiceIdentity>(
+            &temp.path().join("other-idunn.cc"),
+        )?;
         assert!(
-            verify_service_identity_signature::<
-                GameCultProviderHealthIdentity,
-                GameCultRuntimePresenceHealthPurpose,
-            >(&anchor, &changed, &proof)
+            verify_runtime_authority(
+                &fixture.expected,
+                &fixture.activation,
+                &other_idunn.trust_anchor()?,
+                &fixture.stable_public_key,
+            )
+            .is_err()
+        );
+
+        fixture.stable_public_key = vec![9; 32];
+        assert!(fixture_authority(&fixture).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn incumbent_stable_key_without_activation_key_cannot_claim_presence() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        fixture.presence.activation_signature = vec![0; 64];
+        let proof_payload = fixture.presence.canonical_proof_payload()?;
+        fixture.presence.signature = fixture
+            .stable_signer
+            .sign::<GameCultRuntimePresenceHealthPurpose>(&proof_payload)
+            .signature;
+
+        let error = verify_fixture(&fixture).unwrap_err();
+        assert!(error.to_string().contains("activation proof verification"));
+        Ok(())
+    }
+
+    #[test]
+    fn activation_cannot_substitute_another_expected_runtime_id() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        fixture.activation.runtime_id = "ghostlight-yggdrasil-2".into();
+        fixture.presence.runtime_id = fixture.activation.runtime_id.clone();
+        fixture.presence.activation_witness_sha256 = fixture.activation.canonical_sha256()?;
+
+        // The stable service key can re-sign the altered canonical statement,
+        // but the activation proof still came from the other runtime id.
+        let proof_payload = fixture.presence.canonical_proof_payload()?;
+        fixture.presence.signature = fixture
+            .stable_signer
+            .sign::<GameCultRuntimePresenceHealthPurpose>(&proof_payload)
+            .signature;
+        let error = fixture_authority(&fixture).unwrap_err();
+        assert!(error.to_string().contains("current Expected"));
+        Ok(())
+    }
+
+    #[test]
+    fn idunn_signature_prevents_provider_minted_activation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        fixture.activation.issued_at_unix_millis += 1;
+        fixture.presence.activation_witness_sha256 = fixture.activation.canonical_sha256()?;
+        resign_presence(&mut fixture)?;
+        let error = fixture_authority(&fixture).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Idunn runtime activation signature")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_odin_receipt_is_fresh_evidence_not_replay_authority() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        let authority = fixture_authority(&fixture)?;
+        let presence = verify_fixture(&fixture)?;
+        let accepted = authenticated_topology_receipt(&fixture, &presence, true, Vec::new())?;
+        assert_eq!(
+            accepted.record().observed_presence_publisher_sequence,
+            Some(fixture.presence.publisher_sequence)
+        );
+        assert_eq!(
+            accepted.record().signed_presence_sha256.as_deref(),
+            Some(presence.signed_presence_sha256())
+        );
+
+        let mut tampered = accepted.record().clone();
+        tampered.signature = vec![0; 64];
+        assert!(
+            authenticate_odin_runtime_topology_correlation(
+                &tampered.canonical_bytes()?,
+                &authority,
+                presence.record().write_lease_sha256.as_deref(),
+                &fixture.odin_anchor.signer_public_key,
+                OdinTopologyAuthenticationContext {
+                    trusted_received_at_unix_millis: 120,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            authenticate_odin_runtime_topology_correlation(
+                accepted.canonical_bytes(),
+                &authority,
+                presence.record().write_lease_sha256.as_deref(),
+                &fixture.odin_anchor.signer_public_key,
+                OdinTopologyAuthenticationContext {
+                    trusted_received_at_unix_millis: 200,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
+            )
             .is_err()
         );
         Ok(())
     }
 
     #[test]
-    fn runtime_authority_decoders_reject_malformed_and_noncanonical_bytes() -> Result<()> {
+    fn separate_launches_receive_distinct_activation_identities() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let idunn =
+            enroll_service_identity_at::<IdunnServiceIdentity>(&temp.path().join("idunn.cc"))?;
+        let expected = expected_incarnation();
+        let first = IdunnRuntimeActivationLaunch::issue(&expected, digest('8'), 99, &idunn)?;
+        let second = IdunnRuntimeActivationLaunch::issue(&expected, digest('9'), 100, &idunn)?;
+        assert_ne!(
+            first.activation().activation_signer_identity_id,
+            second.activation().activation_signer_identity_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_time_rejects_stale_and_future_presence() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        let authority = fixture_authority(&fixture)?;
+        let canonical = rmp_serde::to_vec(&fixture.presence)?;
         assert!(
-            GameCultRuntimePresenceHealthRecord::decode_canonical_signed_payload(&[0x91, 0xc0])
-                .is_err()
+            authenticate_runtime_presence_claim(
+                &canonical,
+                &authority,
+                RuntimePresenceAuthenticationContext {
+                    trusted_received_at_unix_millis: 200,
+                    maximum_age_millis: 10,
+                    maximum_future_skew_millis: 5,
+                },
+            )
+            .is_err()
+        );
+
+        fixture.presence.observed_at_unix_millis = 126;
+        resign_presence(&mut fixture)?;
+        assert!(
+            authenticate_runtime_presence_claim(
+                &rmp_serde::to_vec(&fixture.presence)?,
+                &authority,
+                RuntimePresenceAuthenticationContext {
+                    trusted_received_at_unix_millis: 120,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
+            )
+            .is_err()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_authority_decoders_reject_malformed_and_noncanonical_bytes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let fixture = dual_proof_fixture(&temp.path().join("runtime-presence.cc"))?;
+        assert!(
+            authenticate_runtime_presence_claim(
+                &[0x91, 0xc0],
+                &fixture_authority(&fixture)?,
+                RuntimePresenceAuthenticationContext {
+                    trusted_received_at_unix_millis: 120,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
+            )
+            .is_err()
         );
         assert!(IdunnRuntimeActivationRecord::decode_canonical(&[0x91, 0xc0]).is_err());
         assert!(IdunnProcessWriteLeaseRecord::decode_canonical(&[0x91, 0xc0]).is_err());
 
+        let mut legacy_presence = fixture.presence.clone();
+        legacy_presence.schema_version = "gamecult.runtime_presence_health.v1".into();
+        assert!(
+            authenticate_runtime_presence_claim(
+                &rmp_serde::to_vec(&legacy_presence)?,
+                &fixture_authority(&fixture)?,
+                RuntimePresenceAuthenticationContext {
+                    trusted_received_at_unix_millis: 120,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
+            )
+            .is_err()
+        );
+        let mut legacy_activation = fixture.activation.clone();
+        legacy_activation.schema_version = "idunn.runtime_activation.v1".into();
+        assert!(
+            IdunnRuntimeActivationRecord::decode_canonical(&rmp_serde::to_vec(&legacy_activation)?)
+                .is_err()
+        );
+        let mut legacy_expected = fixture.expected.clone();
+        legacy_expected.schema_version = "idunn.expected_incarnation.v1".into();
+        assert!(
+            IdunnExpectedIncarnationRecord::decode_canonical(&rmp_serde::to_vec(&legacy_expected)?)
+                .is_err()
+        );
+        let mut legacy_topology = topology_correlation(&fixture.expected);
+        legacy_topology.schema_version = "odin.runtime_topology_correlation.v1".into();
+        assert!(
+            OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
+                &rmp_serde::to_vec(&legacy_topology)?,
+            )
+            .is_err()
+        );
+
         let presence = rmp_serde::to_vec(&runtime_presence())?;
-        assert_eq!(&presence[..3], &[0xdc, 0, 22]);
-        let mut noncanonical_presence = vec![0xdd, 0, 0, 0, 22];
+        assert_eq!(&presence[..3], &[0xdc, 0, 24]);
+        let mut noncanonical_presence = vec![0xdd, 0, 0, 0, 24];
         noncanonical_presence.extend_from_slice(&presence[3..]);
         assert!(
-            GameCultRuntimePresenceHealthRecord::decode_canonical_signed_payload(
+            authenticate_runtime_presence_claim(
                 &noncanonical_presence,
+                &fixture_authority(&fixture)?,
+                RuntimePresenceAuthenticationContext {
+                    trusted_received_at_unix_millis: 120,
+                    maximum_age_millis: 30,
+                    maximum_future_skew_millis: 5,
+                },
             )
             .is_err()
         );
 
         let activation = runtime_activation().canonical_bytes()?;
-        assert_eq!(activation[0], 0x94);
-        let mut noncanonical_activation = vec![0xdc, 0, 4];
+        assert_eq!(activation[0], 0x9a);
+        let mut noncanonical_activation = vec![0xdc, 0, 10];
         noncanonical_activation.extend_from_slice(&activation[1..]);
         assert!(IdunnRuntimeActivationRecord::decode_canonical(&noncanonical_activation).is_err());
 
@@ -1547,6 +2794,11 @@ mod tests {
         value.signed_schema = IDUNN_SIGNED_DAEMON_HEALTH_SCHEMA.into();
         assert!(value.validate().is_err());
 
+        let mut value = anchor.clone();
+        value.signing_purpose = "gamecult.runtime_presence_health.v1".into();
+        value.signed_schema = "gamecult.runtime_presence_health.v1".into();
+        assert!(value.validate().is_err());
+
         let mut value = anchor;
         value.signer_identity_id =
             derive_service_identity_id::<IdunnServiceIdentity>(&value.signer_public_key)?;
@@ -1585,7 +2837,7 @@ mod tests {
         let receipt = topology_correlation(&expected);
         validate_against_current_lease(&receipt, &expected)?;
         let receipt_bytes = receipt.canonical_bytes()?;
-        assert_eq!(&receipt_bytes[..3], &[0xdc, 0, 19]);
+        assert_eq!(&receipt_bytes[..3], &[0xdc, 0, 20]);
         let (decoded, unsigned) =
             OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(&receipt_bytes)?;
         assert_eq!(decoded, receipt);
@@ -1611,7 +2863,7 @@ mod tests {
         assert!(IdunnExpectedIncarnationRecord::decode_canonical(&noncanonical_expected).is_err());
 
         let receipt = topology_correlation(&expected_incarnation()).canonical_bytes()?;
-        let mut noncanonical_receipt = vec![0xdd, 0, 0, 0, 19];
+        let mut noncanonical_receipt = vec![0xdd, 0, 0, 0, 20];
         noncanonical_receipt.extend_from_slice(&receipt[3..]);
         assert!(
             OdinRuntimeTopologyCorrelationRecord::decode_canonical_signed_payload(
@@ -1651,7 +2903,7 @@ mod tests {
         assert!(value.validate().is_err());
 
         let mut value = expected_incarnation();
-        value.capabilities.push(runtime_capability("state"));
+        value.capabilities.push(expected_capability("state"));
         assert!(value.validate().is_err());
 
         let mut value = expected_incarnation();
@@ -1742,6 +2994,7 @@ mod tests {
         let mut value = topology_correlation(&expected);
         value.signed_presence_sha256 = None;
         value.observed_presence_state = None;
+        value.observed_presence_publisher_sequence = None;
         value.observed_write_lease_sha256 = None;
         value.present = false;
         value.ready = false;

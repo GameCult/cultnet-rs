@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/GameCult/cultnet-rs/contracts/idunn.expected-incarnation.schema.json",
-  "title": "Idunn Expected incarnation",
-  "description": "Canonical positional Idunn-owned projection of one admitted deployment incarnation. It carries public source, recipe, artifact, runtime, signer, health, state, route, capability, and dependency facts without actuator paths or runner secrets. Capability and dependency ordering are enforced by the typed contract.",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/idunn.expected-incarnation.v2.schema.json",
+  "title": "Idunn Expected incarnation v2",
+  "description": "Canonical positional Idunn-owned projection of one admitted deployment incarnation. It carries public source, recipe, artifact, runtime, signer, health, state, route, capability, and dependency facts without actuator paths or runner secrets. Capability declarations contain configuration-owned minimum capacity; provider presence owns observed capacity. Capability and dependency ordering are enforced by the typed contract.",
   "type": "array",
   "prefixItems": [
-    { "const": "idunn.expected_incarnation.v1" },
+    { "const": "idunn.expected_incarnation.v2" },
     { "$ref": "#/$defs/identifier" },
     { "$ref": "#/$defs/sha256" },
     { "$ref": "#/$defs/identifier" },
@@ -88,7 +88,12 @@
         { "$ref": "#/$defs/identifier" },
         { "$ref": "#/$defs/identifier" },
         { "$ref": "#/$defs/identifier" },
-        { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Configuration-owned minimum capacity required from a compatible provider. Observed capacity is owned and reported by provider presence."
+        }
       ],
       "minItems": 4,
       "maxItems": 4

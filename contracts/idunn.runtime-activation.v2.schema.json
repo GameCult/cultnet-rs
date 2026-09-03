@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/idunn.runtime-activation.v2.schema.json",
+  "title": "Idunn runtime activation v2",
+  "description": "Canonical positional Idunn launch identity binding one runtime instance to an activation-scoped ephemeral Ed25519 public key. The private key is delivered only to that launch as a systemd credential. Creation alone grants nothing; it becomes current process observation only on Idunn's authenticated observed-activation projection after actuator verification.",
+  "type": "array",
+  "prefixItems": [
+    { "const": "idunn.runtime_activation.v2" },
+    { "$ref": "#/$defs/sha256" },
+    { "$ref": "#/$defs/identifier" },
+    { "$ref": "#/$defs/sha256" },
+    { "$ref": "#/$defs/identifier" },
+    {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 32,
+      "maxItems": 32
+    },
+    { "type": "integer", "minimum": 1 },
+    { "$ref": "#/$defs/identifier" },
+    { "const": "ed25519" },
+    {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 64,
+      "maxItems": 64
+    }
+  ],
+  "minItems": 10,
+  "maxItems": 10,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256-[0-9a-f]{64}$"
+    }
+  }
+}

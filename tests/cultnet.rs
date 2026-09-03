@@ -338,13 +338,13 @@ fn builtin_schema_registry_exposes_runtime_authority_document_payloads() -> Resu
     let registry = builtin_schema_registry()?;
     for (schema_id, schema_version, document_type) in [
         (
-            "https://github.com/GameCult/cultnet-rs/contracts/gamecult.runtime-presence-health.schema.json",
-            "gamecult.runtime_presence_health.v1",
+            "https://github.com/GameCult/cultnet-rs/contracts/gamecult.runtime-presence-health.v2.schema.json",
+            "gamecult.runtime_presence_health.v2",
             "gamecult.runtime_presence_health",
         ),
         (
-            "https://github.com/GameCult/cultnet-rs/contracts/idunn.runtime-activation.schema.json",
-            "idunn.runtime_activation.v1",
+            "https://github.com/GameCult/cultnet-rs/contracts/idunn.runtime-activation.v2.schema.json",
+            "idunn.runtime_activation.v2",
             "idunn.runtime_activation",
         ),
         (
@@ -353,13 +353,13 @@ fn builtin_schema_registry_exposes_runtime_authority_document_payloads() -> Resu
             "idunn.process_write_lease",
         ),
         (
-            "https://github.com/GameCult/cultnet-rs/contracts/idunn.expected-incarnation.schema.json",
-            "idunn.expected_incarnation.v1",
+            "https://github.com/GameCult/cultnet-rs/contracts/idunn.expected-incarnation.v2.schema.json",
+            "idunn.expected_incarnation.v2",
             "idunn.expected_incarnation",
         ),
         (
-            "https://github.com/GameCult/cultnet-rs/contracts/odin.runtime-topology-correlation.schema.json",
-            "odin.runtime_topology_correlation.v1",
+            "https://github.com/GameCult/cultnet-rs/contracts/odin.runtime-topology-correlation.v2.schema.json",
+            "odin.runtime_topology_correlation.v2",
             "odin.runtime_topology_correlation",
         ),
     ] {

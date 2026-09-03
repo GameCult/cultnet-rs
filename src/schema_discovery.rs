@@ -375,17 +375,17 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             Some("idunn.lifecycle_brake"),
         )?,
         schema_registration(
-            include_str!("../contracts/gamecult.runtime-presence-health.schema.json"),
+            include_str!("../contracts/gamecult.runtime-presence-health.v2.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],
-            Some("gamecult.runtime_presence_health.v1"),
+            Some("gamecult.runtime_presence_health.v2"),
             Some("gamecult.runtime_presence_health"),
         )?,
         schema_registration(
-            include_str!("../contracts/idunn.runtime-activation.schema.json"),
+            include_str!("../contracts/idunn.runtime-activation.v2.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],
-            Some("idunn.runtime_activation.v1"),
+            Some("idunn.runtime_activation.v2"),
             Some("idunn.runtime_activation"),
         )?,
         schema_registration(
@@ -396,17 +396,17 @@ pub fn builtin_schema_registry() -> Result<CultNetSchemaRegistry> {
             Some("idunn.process_write_lease"),
         )?,
         schema_registration(
-            include_str!("../contracts/idunn.expected-incarnation.schema.json"),
+            include_str!("../contracts/idunn.expected-incarnation.v2.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],
-            Some("idunn.expected_incarnation.v1"),
+            Some("idunn.expected_incarnation.v2"),
             Some("idunn.expected_incarnation"),
         )?,
         schema_registration(
-            include_str!("../contracts/odin.runtime-topology-correlation.schema.json"),
+            include_str!("../contracts/odin.runtime-topology-correlation.v2.schema.json"),
             CultNetSchemaKind::DocumentPayload,
             vec![CultNetWireContract::CultNetSchemaV0],
-            Some("odin.runtime_topology_correlation.v1"),
+            Some("odin.runtime_topology_correlation.v2"),
             Some("odin.runtime_topology_correlation"),
         )?,
     ] {

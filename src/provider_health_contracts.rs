@@ -266,8 +266,13 @@ impl GameCultServiceTrustAnchorRecord {
         {
             bail!("Idunn provider-health trust anchor profile is invalid");
         }
-        if (self.signed_schema == GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA
-            || self.signing_purpose == GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE)
+        let is_runtime_presence_profile = self
+            .signed_schema
+            .starts_with("gamecult.runtime_presence_health.")
+            || self
+                .signing_purpose
+                .starts_with("gamecult.runtime_presence_health.");
+        if is_runtime_presence_profile
             && (self.signed_schema != GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA
                 || self.signing_purpose != GAMECULT_RUNTIME_PRESENCE_HEALTH_SIGNING_PURPOSE
                 || self.signer_identity_id

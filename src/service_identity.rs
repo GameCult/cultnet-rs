@@ -41,7 +41,7 @@ pub enum OdinTopologyIdentity {}
 pub struct OdinRuntimeTopologyCorrelationPurpose;
 
 impl ServiceSignaturePurpose<OdinTopologyIdentity> for OdinRuntimeTopologyCorrelationPurpose {
-    const PURPOSE: &'static [u8] = b"odin.runtime_topology_correlation.v1";
+    const PURPOSE: &'static [u8] = b"odin.runtime_topology_correlation.v2";
 }
 
 impl ServiceIdentityProfile for OdinTopologyIdentity {
@@ -101,7 +101,7 @@ pub struct GameCultRuntimePresenceHealthPurpose;
 impl ServiceSignaturePurpose<GameCultProviderHealthIdentity>
     for GameCultRuntimePresenceHealthPurpose
 {
-    const PURPOSE: &'static [u8] = b"gamecult.runtime_presence_health.v1";
+    const PURPOSE: &'static [u8] = b"gamecult.runtime_presence_health.v2";
 }
 
 impl ServiceIdentityProfile for GameCultProviderHealthIdentity {
@@ -125,6 +125,15 @@ impl ServiceSignaturePurpose<IdunnServiceIdentity>
     for IdunnAuthenticatedProviderHealthProjectionPurpose
 {
     const PURPOSE: &'static [u8] = b"idunn.authenticated-provider-health-projection.v1";
+}
+
+/// Idunn's stable identity signs every activation before its ephemeral key is
+/// handed to a workload. This makes the launch witness portable without
+/// allowing a configuration file or provider to mint its own activation.
+pub struct IdunnRuntimeActivationPurpose;
+
+impl ServiceSignaturePurpose<IdunnServiceIdentity> for IdunnRuntimeActivationPurpose {
+    const PURPOSE: &'static [u8] = b"idunn.runtime_activation.v2";
 }
 
 impl ServiceIdentityProfile for IdunnServiceIdentity {

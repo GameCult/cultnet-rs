@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/GameCult/cultnet-rs/contracts/gamecult.runtime-presence-health.schema.json",
-  "title": "GameCult runtime presence health",
-  "description": "Provider-signed canonical positional claim from one exact runtime launch. Present authority also requires the matching Idunn-published current activation. Capability ordering and uniqueness by capability/schema/compatibility are enforced by the typed runtime contract.",
+  "$id": "https://github.com/GameCult/cultnet-rs/contracts/gamecult.runtime-presence-health.v2.schema.json",
+  "title": "GameCult runtime presence health v2",
+  "description": "Canonical positional claim from one exact runtime launch, dual-proved by the stable provider identity and Idunn's activation-scoped ephemeral key. Present authority also requires the matching Idunn-published current activation. Capability ordering and uniqueness by capability/schema/compatibility are enforced by the typed runtime contract.",
   "type": "array",
   "prefixItems": [
-    { "const": "gamecult.runtime_presence_health.v1" },
+    { "const": "gamecult.runtime_presence_health.v2" },
     { "$ref": "#/$defs/identifier" },
     { "$ref": "#/$defs/sha256" },
     { "$ref": "#/$defs/sha256" },
@@ -36,10 +36,17 @@
       "items": { "type": "integer", "minimum": 0, "maximum": 255 },
       "minItems": 64,
       "maxItems": 64
+    },
+    { "$ref": "#/$defs/identifier" },
+    {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 64,
+      "maxItems": 64
     }
   ],
-  "minItems": 22,
-  "maxItems": 22,
+  "minItems": 24,
+  "maxItems": 24,
   "allOf": [
     {
       "oneOf": [
